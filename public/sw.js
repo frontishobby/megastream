@@ -1,4 +1,5 @@
-const STREAM_PATH = '/__mega_stream/';
+const SCOPE_PATH = new URL(self.registration.scope).pathname;
+const STREAM_PATH = SCOPE_PATH + '__mega_stream/';
 const sessions = new Map();
 
 self.addEventListener('install', () => {

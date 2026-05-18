@@ -2,7 +2,8 @@ import { defineConfig } from 'vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 
 // https://vite.dev/config/
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
+  base: mode === 'production' ? '/megastream/' : '/',
   plugins: [svelte()],
   define: {
     'global': 'globalThis',
@@ -15,4 +16,4 @@ export default defineConfig({
   optimizeDeps: {
     include: ['megajs', 'buffer']
   }
-})
+}))

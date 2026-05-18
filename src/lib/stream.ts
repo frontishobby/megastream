@@ -25,7 +25,7 @@ export async function ensureServiceWorker(): Promise<void> {
   }
   if (swReadyPromise) return swReadyPromise;
   swReadyPromise = (async () => {
-    await navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' });
+    await navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`, { updateViaCache: 'none' });
     await navigator.serviceWorker.ready;
     if (!navigator.serviceWorker.controller) {
       await new Promise<void>((resolve) => {
@@ -151,7 +151,7 @@ export async function createStreamUrl(node: MegaFileLike): Promise<{ url: string
   });
 
   return {
-    url: `/__mega_stream/${sessionId}`,
+    url: `${import.meta.env.BASE_URL}__mega_stream/${sessionId}`,
     cleanup: () => {
       activeSessions.delete(sessionId);
       navigator.serviceWorker.controller?.postMessage({
