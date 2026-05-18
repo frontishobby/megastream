@@ -14,12 +14,20 @@
   import { Loader2, AlertCircle } from '@lucide/svelte';
   import './app.css';
 
+  interface Quota {
+    spaceUsed?: number;
+    spaceTotal?: number;
+    bandwidthUsed?: number;
+    bandwidthTotal?: number;
+  }
+
   let storage = $state<Storage | null>(null);
   let pathFolders = $state<MegaFile[]>([]);
   let nodes = $state<MegaNode[]>([]);
   let restoring = $state(hasSavedSession());
   let error = $state<string | null>(null);
   let selectedVideo = $state<MegaNode | null>(null);
+  let quota = $state<Quota | null>(null);
 
   const pathDisplay = $derived(
     pathFolders.map((f, i) => ({
@@ -51,6 +59,21 @@
     pathFolders = [s.root as unknown as MegaFile];
     nodes = MegaService.listChildren(s.root as unknown as MegaFile);
     error = null;
+    refreshQuota(s);
+  }
+
+  async function refreshQuota(s: Storage) {
+    try {
+      const info = await s.getAccountInfo();
+      quota = {
+        spaceUsed: info.spaceUsed,
+        spaceTotal: info.spaceTotal,
+        bandwidthUsed: info.downloadBandwidthUsed,
+        bandwidthTotal: info.downloadBandwidthTotal,
+      };
+    } catch (err) {
+      console.warn('Failed to fetch account info', err);
+    }
   }
 
   async function handleLogin(email: string, password: string) {
@@ -67,6 +90,7 @@
     pathFolders = [];
     nodes = [];
     selectedVideo = null;
+    quota = null;
     error = null;
   }
 
@@ -100,6 +124,7 @@
     <Navbar
       path={pathDisplay}
       accountEmail={storage.email || ''}
+      {quota}
       onNavigate={handleNavigate}
       onLogout={handleLogout}
     />
