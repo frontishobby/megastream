@@ -23,8 +23,9 @@
   }
 </script>
 
-<div 
-  class="bg-gray-800 rounded-lg p-4 hover:bg-gray-700 transition-colors cursor-pointer group border border-gray-700"
+<button
+  type="button"
+  class="w-full text-left bg-gray-800 rounded-lg p-4 hover:bg-gray-700 transition-colors cursor-pointer group border border-gray-700"
   onclick={() => onSelect(node)}
 >
   <div class="flex items-start gap-3">
@@ -37,7 +38,7 @@
         <File class="text-gray-400" size={24} />
       {/if}
     </div>
-    
+
     <div class="flex-1 min-w-0">
       <h3 class="text-gray-100 font-medium truncate" title={node.name}>
         {node.name}
@@ -53,4 +54,4 @@
       </div>
     {/if}
   </div>
-</div>
+</button>

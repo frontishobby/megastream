@@ -1,46 +1,35 @@
-import { File, Storage } from 'megajs';
+import type { File } from 'megajs';
 
 export interface MegaNode {
   name: string;
   size?: number;
   type: 'file' | 'folder';
   id: string;
-  attributes?: any;
-  handle?: string;
-  node?: any;
+  node: File;
+}
+
+function fileId(file: File): string {
+  if (file.nodeId) return file.nodeId;
+  const dl = (file as any).downloadId;
+  if (typeof dl === 'string') return dl;
+  if (Array.isArray(dl)) return dl.join('/');
+  return '';
 }
 
 export class MegaService {
-  static async getNodesFromUrl(url: string): Promise<MegaNode[]> {
-    try {
-      const file = File.fromURL(url);
-      await file.loadAttributes();
-
-      if (file.children) {
-        return file.children.map(child => ({
-          name: child.name || 'Unknown',
-          size: child.size,
-          type: child.directory ? 'folder' : 'file',
-          id: child.handle || '',
-          node: child
-        }));
-      }
-
-      return [{
-        name: file.name || 'Unknown',
-        size: file.size,
-        type: file.directory ? 'folder' : 'file',
-        id: file.handle || '',
-        node: file
-      }];
-    } catch (error) {
-      console.error('Error loading Mega URL:', error);
-      throw error;
-    }
+  static listChildren(folder: File): MegaNode[] {
+    const children = folder.children || [];
+    return children.map((child) => ({
+      name: child.name || 'Unknown',
+      size: child.size,
+      type: child.directory ? 'folder' : 'file',
+      id: fileId(child),
+      node: child,
+    }));
   }
 
   static isVideo(name: string): boolean {
-    const videoExtensions = ['.mp4', '.mkv', '.webm', '.avi', '.mov'];
-    return videoExtensions.some(ext => name.toLowerCase().endsWith(ext));
+    const videoExtensions = ['.mp4', '.m4v', '.mkv', '.webm', '.avi', '.mov', '.ogg', '.ogv'];
+    return videoExtensions.some((ext) => name.toLowerCase().endsWith(ext));
   }
 }
