@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { File, Folder, Play } from '@lucide/svelte';
+  import { File, Folder, Play, StickyNote, Pencil, Check, X, Loader2 } from '@lucide/svelte';
+  import { untrack } from 'svelte';
   import type { MegaNode } from '../mega';
   import { MegaService } from '../mega';
   import { getThumbnail } from '../thumbnails';
@@ -11,9 +12,20 @@
 
   const isVideo = $derived(node.type === 'file' && MegaService.isVideo(node.name));
 
-  let cardEl: HTMLButtonElement | undefined = $state();
+  let cardEl: HTMLDivElement | undefined = $state();
   let thumbnail = $state<string | null>(null);
   let thumbnailLoading = $state(false);
+
+  let memo = $state<string | undefined>(untrack(() => node.memo));
+  let editing = $state(false);
+  let draft = $state('');
+  let saving = $state(false);
+  let saveError = $state<string | null>(null);
+  let textareaEl: HTMLTextAreaElement | undefined = $state();
+
+  $effect(() => {
+    memo = node.memo;
+  });
 
   function formatSize(bytes?: number) {
     if (!bytes) return 'N/A';
@@ -25,6 +37,65 @@
       unitIndex++;
     }
     return `${size.toFixed(2)} ${units[unitIndex]}`;
+  }
+
+  function handleCardClick(e: MouseEvent) {
+    if (editing) return;
+    if (e.target !== e.currentTarget && !(e.target as HTMLElement).closest('[data-card-surface]')) return;
+    onSelect(node);
+  }
+
+  function handleCardKey(e: KeyboardEvent) {
+    if (editing) return;
+    if (e.target !== e.currentTarget) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      onSelect(node);
+    }
+  }
+
+  function startEdit(e: MouseEvent) {
+    e.stopPropagation();
+    draft = memo ?? '';
+    editing = true;
+    saveError = null;
+    queueMicrotask(() => textareaEl?.focus());
+  }
+
+  function cancelEdit(e?: MouseEvent) {
+    e?.stopPropagation();
+    editing = false;
+    draft = '';
+    saveError = null;
+  }
+
+  async function saveMemo(e?: MouseEvent) {
+    e?.stopPropagation();
+    if (saving) return;
+    saving = true;
+    saveError = null;
+    try {
+      const next = await MegaService.setMemo(node.node, draft);
+      memo = next;
+      node.memo = next;
+      editing = false;
+      draft = '';
+    } catch (err) {
+      saveError = err instanceof Error ? err.message : 'Failed to save';
+    } finally {
+      saving = false;
+    }
+  }
+
+  function memoKey(e: KeyboardEvent) {
+    e.stopPropagation();
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelEdit();
+    } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      saveMemo();
+    }
   }
 
   $effect(() => {
@@ -61,13 +132,15 @@
   });
 </script>
 
-<button
-  type="button"
+<div
   bind:this={cardEl}
-  class="w-full text-left bg-gray-800 rounded-lg overflow-hidden hover:bg-gray-700 transition-colors cursor-pointer group border border-gray-700 flex flex-col"
-  onclick={() => onSelect(node)}
+  role="button"
+  tabindex="0"
+  class="w-full text-left bg-gray-800 rounded-lg overflow-hidden hover:bg-gray-700 transition-colors cursor-pointer group border border-gray-700 flex flex-col focus:outline-none focus:ring-2 focus:ring-red-500"
+  onclick={handleCardClick}
+  onkeydown={handleCardKey}
 >
-  <div class="aspect-video bg-gray-900 relative overflow-hidden">
+  <div class="aspect-video bg-gray-900 relative overflow-hidden" data-card-surface>
     {#if thumbnail}
       <img
         src={thumbnail}
@@ -97,14 +170,91 @@
         {/if}
       </div>
     {/if}
+
+    {#if memo && !editing}
+      <div
+        class="absolute top-2 right-2 bg-amber-500/90 text-gray-900 rounded-full p-1"
+        title="Has a note"
+      >
+        <StickyNote size={14} />
+      </div>
+    {/if}
   </div>
 
   <div class="p-3 flex-1 min-w-0">
-    <h3 class="text-gray-100 text-sm font-medium truncate" title={node.name}>
+    <h3 class="text-gray-100 text-sm font-medium truncate" title={node.name} data-card-surface>
       {node.name}
     </h3>
-    <p class="text-gray-400 text-xs mt-1">
+    <p class="text-gray-400 text-xs mt-1" data-card-surface>
       {node.type === 'folder' ? 'Folder' : formatSize(node.size)}
     </p>
+
+    {#if editing}
+      <div class="mt-2">
+        <textarea
+          bind:this={textareaEl}
+          bind:value={draft}
+          onclick={(e) => e.stopPropagation()}
+          onkeydown={memoKey}
+          rows="3"
+          maxlength="2000"
+          placeholder="Add a note…"
+          class="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 resize-none focus:outline-none focus:border-red-500"
+        ></textarea>
+        {#if saveError}
+          <p class="text-red-400 text-[11px] mt-1">{saveError}</p>
+        {/if}
+        <div class="flex items-center justify-end gap-1 mt-1">
+          <button
+            type="button"
+            onclick={cancelEdit}
+            disabled={saving}
+            class="text-gray-400 hover:text-gray-200 p-1 rounded disabled:opacity-50"
+            title="Cancel (Esc)"
+            aria-label="Cancel"
+          >
+            <X size={14} />
+          </button>
+          <button
+            type="button"
+            onclick={saveMemo}
+            disabled={saving}
+            class="text-green-400 hover:text-green-300 p-1 rounded disabled:opacity-50"
+            title="Save (⌘/Ctrl + Enter)"
+            aria-label="Save"
+          >
+            {#if saving}
+              <Loader2 size={14} class="animate-spin" />
+            {:else}
+              <Check size={14} />
+            {/if}
+          </button>
+        </div>
+      </div>
+    {:else if memo}
+      <div class="mt-2 flex items-start gap-1.5">
+        <p class="text-amber-300/90 text-xs flex-1 whitespace-pre-wrap break-words line-clamp-3">
+          {memo}
+        </p>
+        <button
+          type="button"
+          onclick={startEdit}
+          class="text-gray-500 hover:text-gray-200 p-0.5 rounded shrink-0"
+          title="Edit note"
+          aria-label="Edit note"
+        >
+          <Pencil size={12} />
+        </button>
+      </div>
+    {:else}
+      <button
+        type="button"
+        onclick={startEdit}
+        class="mt-2 text-gray-500 hover:text-gray-200 text-xs inline-flex items-center gap-1"
+      >
+        <StickyNote size={12} />
+        <span>Add note</span>
+      </button>
+    {/if}
   </div>
-</button>
+</div>
