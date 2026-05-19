@@ -65,10 +65,16 @@
   async function refreshQuota(s: Storage) {
     try {
       const info = await s.getAccountInfo();
+      // MEGA's `caxfer` (own downloads) is often 0 even on PRO accounts.
+      // The quota actually consumed is `caxfer + csxfer` — bandwidth used via
+      // shared links also counts against the PRO transfer quota, and is what
+      // MEGA's own UI shows as "Transfer used".
+      const used =
+        (info.downloadBandwidthUsed || 0) + (info.sharedBandwidthUsed || 0);
       quota = {
         spaceUsed: info.spaceUsed,
         spaceTotal: info.spaceTotal,
-        bandwidthUsed: info.downloadBandwidthUsed,
+        bandwidthUsed: used,
         bandwidthTotal: info.downloadBandwidthTotal,
       };
     } catch (err) {
