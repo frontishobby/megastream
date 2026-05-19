@@ -19,7 +19,7 @@ function fileId(file: File): string {
 
 function readMemo(file: File): string | undefined {
   const attrs = (file as any).attributes;
-  const m = attrs?.memo;
+  const m = attrs?._memo;
   return typeof m === 'string' && m.length > 0 ? m : undefined;
 }
 
@@ -44,7 +44,7 @@ export class MegaService {
   static async setMemo(file: File, memo: string): Promise<string | undefined> {
     const trimmed = memo.trim();
     const value = trimmed.length > 0 ? trimmed : undefined;
-    await (file as MutableFile).setAttributes({ memo: value } as unknown as JSON);
+    await (file as MutableFile).setAttributes({ _memo: value } as unknown as JSON);
     return value;
   }
 }
