@@ -2,6 +2,9 @@ import { mount } from 'svelte'
 import './app.css'
 import App from './App.svelte'
 import { ensureServiceWorker, isServiceWorkerSupported } from './lib/stream'
+import { patchMegaForFa } from './lib/fileAttribute'
+
+patchMegaForFa()
 
 if (isServiceWorkerSupported()) {
   ensureServiceWorker().catch((err) => {

@@ -1,4 +1,6 @@
 import { createStreamUrl } from './stream';
+import { fetchFileAttribute } from './fileAttribute';
+import type { File as MegaFile } from 'megajs';
 
 const DB_NAME = 'megastream';
 const STORE = 'thumbnails';
@@ -162,6 +164,26 @@ async function captureFrame(node: MegaFileLike): Promise<string> {
 
 const inflight = new Map<string, Promise<string | null>>();
 
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function fetchFromMega(node: MegaFile): Promise<string | null> {
+  try {
+    const blob = await fetchFileAttribute(node, 0);
+    if (!blob) return null;
+    return await blobToDataUrl(blob);
+  } catch (err) {
+    console.warn('FA thumbnail fetch failed', err);
+    return null;
+  }
+}
+
 export async function getThumbnail(
   cacheKey: string,
   node: MegaFileLike
@@ -173,16 +195,25 @@ export async function getThumbnail(
   if (existing) return existing;
 
   const task = (async () => {
-    await sem.acquire();
     try {
-      const dataUrl = await captureFrame(node);
-      await setCached(cacheKey, dataUrl);
-      return dataUrl;
-    } catch (err) {
-      console.warn('Thumbnail generation failed for', node.name, err);
-      return null;
+      const fromFa = await fetchFromMega(node as unknown as MegaFile);
+      if (fromFa) {
+        await setCached(cacheKey, fromFa);
+        return fromFa;
+      }
+
+      await sem.acquire();
+      try {
+        const dataUrl = await captureFrame(node);
+        await setCached(cacheKey, dataUrl);
+        return dataUrl;
+      } catch (err) {
+        console.warn('Thumbnail generation failed for', node.name, err);
+        return null;
+      } finally {
+        sem.release();
+      }
     } finally {
-      sem.release();
       inflight.delete(cacheKey);
     }
   })();
