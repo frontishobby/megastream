@@ -23,8 +23,19 @@
   let saveError = $state<string | null>(null);
   let textareaEl: HTMLTextAreaElement | undefined = $state();
 
+  let title = $state<string>(untrack(() => node.name));
+  let renaming = $state(false);
+  let nameDraft = $state('');
+  let renameSaving = $state(false);
+  let renameError = $state<string | null>(null);
+  let nameInput: HTMLInputElement | undefined = $state();
+
   $effect(() => {
     memo = node.memo;
+  });
+
+  $effect(() => {
+    title = node.name;
   });
 
   function formatSize(bytes?: number) {
@@ -40,13 +51,13 @@
   }
 
   function handleCardClick(e: MouseEvent) {
-    if (editing) return;
+    if (editing || renaming) return;
     if (e.target !== e.currentTarget && !(e.target as HTMLElement).closest('[data-card-surface]')) return;
     onSelect(node);
   }
 
   function handleCardKey(e: KeyboardEvent) {
-    if (editing) return;
+    if (editing || renaming) return;
     if (e.target !== e.currentTarget) return;
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
@@ -95,6 +106,57 @@
     } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       saveMemo();
+    }
+  }
+
+  function startRename(e: MouseEvent) {
+    e.stopPropagation();
+    nameDraft = title;
+    renaming = true;
+    renameError = null;
+    queueMicrotask(() => {
+      nameInput?.focus();
+      nameInput?.select();
+    });
+  }
+
+  function cancelRename(e?: MouseEvent) {
+    e?.stopPropagation();
+    renaming = false;
+    nameDraft = '';
+    renameError = null;
+  }
+
+  async function saveRename(e?: MouseEvent) {
+    e?.stopPropagation();
+    if (renameSaving) return;
+    if (!nameDraft.trim() || nameDraft.trim() === title) {
+      cancelRename();
+      return;
+    }
+    renameSaving = true;
+    renameError = null;
+    try {
+      const next = await MegaService.renameFile(node.node, nameDraft);
+      title = next;
+      node.name = next;
+      renaming = false;
+      nameDraft = '';
+    } catch (err) {
+      renameError = err instanceof Error ? err.message : 'Failed to rename';
+    } finally {
+      renameSaving = false;
+    }
+  }
+
+  function nameKey(e: KeyboardEvent) {
+    e.stopPropagation();
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelRename();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      saveRename();
     }
   }
 
@@ -182,9 +244,67 @@
   </div>
 
   <div class="p-3 flex-1 min-w-0">
-    <h3 class="text-gray-100 text-sm font-medium truncate" title={node.name} data-card-surface>
-      {node.name}
-    </h3>
+    {#if renaming}
+      <div>
+        <div class="flex items-center gap-1">
+          <input
+            bind:this={nameInput}
+            bind:value={nameDraft}
+            onclick={(e) => e.stopPropagation()}
+            onkeydown={nameKey}
+            disabled={renameSaving}
+            maxlength="255"
+            class="flex-1 min-w-0 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm text-gray-100 focus:outline-none focus:border-red-500 disabled:opacity-50"
+          />
+          <button
+            type="button"
+            onclick={cancelRename}
+            disabled={renameSaving}
+            class="text-gray-400 hover:text-gray-200 p-1 rounded disabled:opacity-50"
+            title="Cancel (Esc)"
+            aria-label="Cancel rename"
+          >
+            <X size={14} />
+          </button>
+          <button
+            type="button"
+            onclick={saveRename}
+            disabled={renameSaving}
+            class="text-green-400 hover:text-green-300 p-1 rounded disabled:opacity-50"
+            title="Save (Enter)"
+            aria-label="Save rename"
+          >
+            {#if renameSaving}
+              <Loader2 size={14} class="animate-spin" />
+            {:else}
+              <Check size={14} />
+            {/if}
+          </button>
+        </div>
+        {#if renameError}
+          <p class="text-red-400 text-[11px] mt-1">{renameError}</p>
+        {/if}
+      </div>
+    {:else}
+      <div class="flex items-start gap-1">
+        <h3
+          class="text-gray-100 text-sm font-medium truncate flex-1 min-w-0"
+          title={title}
+          data-card-surface
+        >
+          {title}
+        </h3>
+        <button
+          type="button"
+          onclick={startRename}
+          class="text-gray-500 hover:text-gray-200 p-0.5 rounded shrink-0 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+          title="Rename"
+          aria-label="Rename"
+        >
+          <Pencil size={12} />
+        </button>
+      </div>
+    {/if}
     <p class="text-gray-400 text-xs mt-1" data-card-surface>
       {node.type === 'folder' ? 'Folder' : formatSize(node.size)}
     </p>
@@ -239,7 +359,7 @@
         <button
           type="button"
           onclick={startEdit}
-          class="text-gray-500 hover:text-gray-200 p-0.5 rounded shrink-0"
+          class="text-gray-500 hover:text-gray-200 p-0.5 rounded shrink-0 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
           title="Edit note"
           aria-label="Edit note"
         >
