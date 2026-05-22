@@ -12,7 +12,9 @@
     hasSavedSession,
   } from './lib/session';
   import { router, navigate } from './lib/router.svelte';
-  import { Loader2, AlertCircle } from '@lucide/svelte';
+  import { enqueueUpload } from './lib/upload.svelte';
+  import UploadPanel from './lib/components/UploadPanel.svelte';
+  import { Loader2, AlertCircle, Upload } from '@lucide/svelte';
   import './app.css';
 
   interface Quota {
@@ -28,6 +30,9 @@
   let restoring = $state(hasSavedSession());
   let error = $state<string | null>(null);
   let quota = $state<Quota | null>(null);
+  let fileInput = $state<HTMLInputElement | null>(null);
+
+  const currentFolder = $derived(pathFolders[pathFolders.length - 1]);
 
   const selectedVideo = $derived.by<MegaNode | null>(() => {
     const r = router.current;
@@ -97,6 +102,30 @@
     nodes = MegaService.listChildren(s.root as unknown as MegaFile);
     error = null;
     refreshQuota(s);
+    (s as unknown as { on: (e: string, l: (f: MegaFile) => void) => void }).on('add', onNodeAdded);
+  }
+
+  function onNodeAdded(added: MegaFile) {
+    if (!currentFolder) return;
+    if (added.parent === currentFolder) {
+      nodes = MegaService.listChildren(currentFolder);
+      if (storage) refreshQuota(storage);
+    }
+  }
+
+  function handleUploadClick() {
+    fileInput?.click();
+  }
+
+  function handleFilesSelected(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const files = input.files;
+    if (!files || files.length === 0 || !currentFolder) return;
+    const folder = currentFolder as unknown as Parameters<typeof enqueueUpload>[0];
+    for (const file of Array.from(files)) {
+      enqueueUpload(folder, file);
+    }
+    input.value = '';
   }
 
   async function refreshQuota(s: Storage) {
@@ -194,6 +223,18 @@
           </div>
         {/if}
 
+        <div class="flex justify-end mb-4">
+          <button
+            type="button"
+            onclick={handleUploadClick}
+            disabled={!currentFolder}
+            class="inline-flex items-center gap-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium px-4 py-2 rounded-full transition-colors"
+          >
+            <Upload size={16} />
+            <span>Upload</span>
+          </button>
+        </div>
+
         {#if nodes.length > 0}
           <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {#each nodes as node (node.id)}
@@ -205,6 +246,15 @@
         {/if}
       </main>
     {/if}
+
+    <input
+      bind:this={fileInput}
+      type="file"
+      multiple
+      class="hidden"
+      onchange={handleFilesSelected}
+    />
+    <UploadPanel />
 
     <footer class="p-6 text-center text-gray-600 text-sm border-t border-gray-900 mt-auto">
       <p>
