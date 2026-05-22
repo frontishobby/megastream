@@ -14,7 +14,7 @@
   import { router, navigate } from './lib/router.svelte';
   import { enqueueUpload } from './lib/upload.svelte';
   import UploadPanel from './lib/components/UploadPanel.svelte';
-  import { Loader2, AlertCircle, Upload } from '@lucide/svelte';
+  import { Loader2, AlertCircle, Upload, FolderPlus } from '@lucide/svelte';
   import './app.css';
 
   interface Quota {
@@ -123,6 +123,24 @@
 
   function handleUploadClick() {
     fileInput?.click();
+  }
+
+  let creatingFolder = $state(false);
+
+  async function handleCreateFolder() {
+    if (!currentFolder || creatingFolder) return;
+    const name = window.prompt('New folder name')?.trim();
+    if (!name) return;
+    creatingFolder = true;
+    try {
+      await (currentFolder as unknown as {
+        mkdir: (opt: { name: string }) => Promise<unknown>;
+      }).mkdir({ name });
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    } finally {
+      creatingFolder = false;
+    }
   }
 
   function handleFilesSelected(e: Event) {
@@ -234,7 +252,16 @@
           </div>
         {/if}
 
-        <div class="flex justify-end mb-4">
+        <div class="flex justify-end mb-4 gap-2">
+          <button
+            type="button"
+            onclick={handleCreateFolder}
+            disabled={!currentFolder || creatingFolder}
+            class="inline-flex items-center gap-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 text-sm font-medium px-4 py-2 rounded-full transition-colors"
+          >
+            <FolderPlus size={16} />
+            <span>New folder</span>
+          </button>
           <button
             type="button"
             onclick={handleUploadClick}

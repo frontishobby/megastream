@@ -10,14 +10,15 @@ export interface UploadJob {
   status: UploadStatus;
   error?: string;
   folderId: string;
-  cancel?: () => void;
 }
 
 const MAX_CONCURRENT = 3;
+const AUTO_REMOVE_DONE_MS = 2500;
 
 let _jobs = $state<UploadJob[]>([]);
 let running = 0;
-const queue: Array<{ job: UploadJob; file: File; folder: MutableFile }> = [];
+const queue: Array<{ id: string; file: File; folder: MutableFile }> = [];
+const cancellers = new Map<string, () => void>();
 
 export const uploads = {
   get jobs(): UploadJob[] {
@@ -25,21 +26,27 @@ export const uploads = {
   },
 };
 
+function findJob(id: string): UploadJob | undefined {
+  // Returns the proxied entry from $state — mutations on this trigger UI updates.
+  return _jobs.find((j) => j.id === id);
+}
+
 export function enqueueUpload(folder: MutableFile, file: File): UploadJob {
+  const id = crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const job: UploadJob = {
-    id: crypto.randomUUID
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    id,
     name: file.name,
     size: file.size,
     uploaded: 0,
     status: 'queued',
     folderId: folder.nodeId || '',
   };
-  _jobs = [..._jobs, job];
-  queue.push({ job, file, folder });
+  _jobs.push(job);
+  queue.push({ id, file, folder });
   drain();
-  return job;
+  return findJob(id) ?? job;
 }
 
 export function clearFinishedUploads() {
@@ -47,54 +54,70 @@ export function clearFinishedUploads() {
 }
 
 export function cancelUpload(jobId: string) {
-  const job = _jobs.find((j) => j.id === jobId);
+  const job = findJob(jobId);
   if (!job) return;
   if (job.status === 'uploading' || job.status === 'queued') {
     job.status = 'cancelled';
-    job.cancel?.();
+    cancellers.get(jobId)?.();
+    cancellers.delete(jobId);
   }
+}
+
+function scheduleAutoRemove(id: string) {
+  setTimeout(() => {
+    const j = findJob(id);
+    if (!j) return;
+    if (j.status === 'done' || j.status === 'cancelled') {
+      _jobs = _jobs.filter((x) => x.id !== id);
+    }
+  }, AUTO_REMOVE_DONE_MS);
 }
 
 function drain() {
   while (running < MAX_CONCURRENT && queue.length > 0) {
     const next = queue.shift();
     if (!next) break;
-    if (next.job.status === 'cancelled') continue;
+    const job = findJob(next.id);
+    if (!job || job.status === 'cancelled') continue;
     running++;
-    run(next).finally(() => {
+    run(next.id, next.file, next.folder).finally(() => {
       running--;
+      cancellers.delete(next.id);
       drain();
     });
   }
 }
 
-async function run({ job, file, folder }: { job: UploadJob; file: File; folder: MutableFile }) {
+async function run(id: string, file: File, folder: MutableFile) {
+  const job = findJob(id);
+  if (!job) return;
   job.status = 'uploading';
   let uploadStream: any;
   try {
     uploadStream = (folder as any).upload({ name: file.name, size: file.size });
-    job.cancel = () => {
+    cancellers.set(id, () => {
       try {
         uploadStream?.destroy?.();
       } catch (_) {}
-    };
+    });
 
     const reader = file.stream().getReader();
     while (true) {
-      // @ts-expect-error — UploadJob status is mutated externally on cancel
-      if (job.status === 'cancelled') {
+      const current = findJob(id);
+      if (!current || current.status === 'cancelled') {
         try {
           uploadStream.destroy();
         } catch (_) {}
         try {
           reader.cancel();
         } catch (_) {}
+        scheduleAutoRemove(id);
         return;
       }
       const { value, done } = await reader.read();
       if (done) break;
       const ok = uploadStream.write(value);
-      job.uploaded += value.byteLength;
+      current.uploaded += value.byteLength;
       if (!ok) {
         await new Promise<void>((resolve, reject) => {
           const onDrain = () => {
@@ -114,12 +137,20 @@ async function run({ job, file, folder }: { job: UploadJob; file: File; folder: 
     }
     uploadStream.end();
     await uploadStream.complete;
-    job.status = 'done';
-    job.uploaded = job.size;
+    const done = findJob(id);
+    if (done) {
+      done.status = 'done';
+      done.uploaded = done.size;
+      scheduleAutoRemove(id);
+    }
   } catch (err) {
-    // @ts-expect-error — see above
-    if (job.status === 'cancelled') return;
-    job.status = 'error';
-    job.error = err instanceof Error ? err.message : String(err);
+    const failed = findJob(id);
+    if (!failed) return;
+    if (failed.status === 'cancelled') {
+      scheduleAutoRemove(id);
+      return;
+    }
+    failed.status = 'error';
+    failed.error = err instanceof Error ? err.message : String(err);
   }
 }
