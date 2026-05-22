@@ -1,47 +1,102 @@
-# Svelte + TS + Vite
+# MegaStream
 
-This template should help get you started developing with Svelte and TypeScript in Vite.
+A browser-based streaming client for [MEGA](https://mega.nz). Browse your MEGA drive, stream video files directly without downloading the whole file first, and manage metadata — all from a clean, fast UI.
 
-## Recommended IDE Setup
+## Features
 
-[VS Code](https://code.visualstudio.com/) + [Svelte](https://marketplace.visualstudio.com/items?itemName=svelte.svelte-vscode).
+- **Login with persisted session** — log in once with MEGA credentials; the session is saved to `localStorage` and restored on reload.
+- **Folder browsing with hash routing** — every folder has a URL (`#/folder/<id>`). Refresh, share, or bookmark deep links and land back in the same place.
+- **Seekable video streaming** — videos are served through a Service Worker that proxies ranged `Range` requests into `megajs` download streams. The browser's `<video>` element gets full seek/scrub support without buffering the entire file.
+- **Thumbnails from MEGA file attributes** — lazily decrypts FA type 0 (thumbnail) blobs as the user scrolls, with in-memory caching.
+- **Per-video detail page** — `#/file/<id>` renders a full-width player (capped at 1920px), inline rename, editable memo, upload date, resolution, duration, size, and node ID.
+- **Inline rename** — pencil button (hover-revealed) on every file/folder card and on the detail page. `Enter` to save, `Esc` to cancel.
+- **Memos** — free-form notes per file, stored as MEGA custom node attributes (`_memo`) so they're encrypted with the node key and persist across clients.
+- **Multi-file uploads** — file picker, parallel uploads (max 3 concurrent), per-file progress with backpressure handling, cancel mid-upload. A floating panel tracks all jobs.
+- **Quota indicator** — storage and transfer bandwidth used / total, sourced from `getAccountInfo`.
 
-## Need an official Svelte framework?
+## Tech stack
 
-Check out [SvelteKit](https://github.com/sveltejs/kit#readme), which is also powered by Vite. Deploy anywhere with its serverless-first approach and adapt to various platforms, with out of the box support for TypeScript, SCSS, and Less, and easily-added support for mdsvex, GraphQL, PostCSS, Tailwind CSS, and more.
+- [Svelte 5](https://svelte.dev) (runes, no SvelteKit)
+- TypeScript
+- [Vite 8](https://vitejs.dev)
+- [Tailwind CSS 4](https://tailwindcss.com)
+- [megajs](https://github.com/tonygomes/megajs) — MEGA SDK
+- Service Worker for ranged streaming
+- Web Crypto API for decoding MEGA file attribute payloads (AES-CBC)
 
-## Technical considerations
+## Getting started
 
-**Why use this over SvelteKit?**
-
-- It brings its own routing solution which might not be preferable for some users.
-- It is first and foremost a framework that just happens to use Vite under the hood, not a Vite app.
-
-This template contains as little as possible to get started with Vite + TypeScript + Svelte, while taking into account the developer experience with regards to HMR and intellisense. It demonstrates capabilities on par with the other `create-vite` templates and is a good starting point for beginners dipping their toes into a Vite + Svelte project.
-
-Should you later need the extended capabilities and extensibility provided by SvelteKit, the template has been structured similarly to SvelteKit so that it is easy to migrate.
-
-**Why `global.d.ts` instead of `compilerOptions.types` inside `jsconfig.json` or `tsconfig.json`?**
-
-Setting `compilerOptions.types` shuts out all other types not explicitly listed in the configuration. Using triple-slash references keeps the default TypeScript setting of accepting type information from the entire workspace, while also adding `svelte` and `vite/client` type information.
-
-**Why include `.vscode/extensions.json`?**
-
-Other templates indirectly recommend extensions via the README, but this file allows VS Code to prompt the user to install the recommended extension upon opening the project.
-
-**Why enable `allowJs` in the TS template?**
-
-While `allowJs: false` would indeed prevent the use of `.js` files in the project, it does not prevent the use of JavaScript syntax in `.svelte` files. In addition, it would force `checkJs: false`, bringing the worst of both worlds: not being able to guarantee the entire codebase is TypeScript, and also having worse typechecking for the existing JavaScript. In addition, there are valid use cases in which a mixed codebase may be relevant.
-
-**Why is HMR not preserving my local component state?**
-
-HMR state preservation comes with a number of gotchas! It has been disabled by default in both `svelte-hmr` and `@sveltejs/vite-plugin-svelte` due to its often surprising behavior. You can read the details [here](https://github.com/rixo/svelte-hmr#svelte-hmr).
-
-If you have state that's important to retain within a component, consider creating an external store which would not be replaced by HMR.
-
-```ts
-// store.ts
-// An extremely simple external store
-import { writable } from 'svelte/store'
-export default writable(0)
+```sh
+npm install
+npm run dev      # vite dev server
+npm run build    # production build
+npm run check    # svelte-check + tsc
+npm run preview  # preview the production build
 ```
+
+Open the dev server URL, log in with your MEGA email and password, and start browsing.
+
+> **Note**: MEGA credentials are sent directly to MEGA's servers from your browser. The session blob in `localStorage` is enough to re-authenticate — treat it like a password.
+
+## Architecture notes
+
+### Routing
+
+Hash routing lives in `src/lib/router.svelte.ts`. Three routes:
+
+- `#` — home (root folder)
+- `#/folder/<id>` — folder view
+- `#/file/<id>` — video detail
+
+The router exposes a reactive `router.current` and a `navigate()` helper. `App.svelte` has a single `$effect` that derives `pathFolders` and `nodes` from `router.current + storage`, so refresh / direct URL entry / rename-then-back all converge on the same listing.
+
+### Streaming
+
+`src/lib/stream.ts` registers a Service Worker (`public/sw.js`) and assigns each play session a random ID. The Service Worker intercepts requests to `/__mega_stream/<sessionId>`, asks the page (via `postMessage`) for the requested byte range, and the page calls `node.download({ start, end })` and streams chunks back. This sidesteps the need to materialize the full encrypted blob and gives the `<video>` element first-class range support.
+
+### File attributes (FA)
+
+MEGA stores thumbnails / previews / media metadata in a separate channel encoded into a node's `fa` string. `src/lib/fileAttribute.ts` patches `megajs`'s `File.prototype.loadMetadata` to capture the `fa` field at load time, then decodes type 0 (thumbnail) by:
+
+1. Parsing the `type*hash` entries
+2. Calling MEGA's `ufa` endpoint to get a POST URL
+3. POSTing the handle bytes
+4. AES-CBC decrypting with a synthetic PKCS7 trailer trick (MEGA uses zero-padding; Web Crypto wants PKCS7)
+5. Trimming trailing JPEG padding to the `FFD9` end-of-image marker
+
+### Memos & rename
+
+Memos use `MutableFile.setAttributes({ _memo: value })` — the underscore prefix is the MEGA convention for app-specific custom keys. Rename uses `MutableFile.rename()`. Both are encrypted with the node key.
+
+### Uploads
+
+`src/lib/upload.svelte.ts` runs a simple queue with a concurrency cap of 3. Each job reads the browser `File` via `file.stream().getReader()` and writes chunks into the `megajs` `Writable` returned by `folder.upload(...)`, awaiting the `drain` event when `write()` returns false. Job state is exposed as a reactive store and rendered by `UploadPanel.svelte`. Completion triggers MEGA's `add` event on `Storage`, which `App.svelte` listens for to refresh the current folder.
+
+## Project layout
+
+```
+src/
+  App.svelte              — root component, route → folder/file resolution
+  lib/
+    router.svelte.ts      — hash router with reactive state
+    mega.ts               — MegaService: listChildren, isVideo, setMemo, renameFile
+    session.ts            — login / persist / restore
+    stream.ts             — Service Worker streaming bridge
+    thumbnails.ts         — lazy thumbnail loader with cache
+    fileAttribute.ts      — FA decoder
+    upload.svelte.ts      — upload queue & job store
+    components/
+      Navbar.svelte
+      Breadcrumb.svelte
+      QuotaInfo.svelte
+      FileCard.svelte     — grid card with inline rename & memo
+      VideoView.svelte    — detail page
+      UploadPanel.svelte  — floating upload progress panel
+      LoginScreen.svelte
+public/
+  sw.js                   — Service Worker for ranged streaming
+```
+
+## License
+
+Personal project — no license declared. Use at your own discretion.
