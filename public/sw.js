@@ -19,6 +19,11 @@ self.addEventListener('message', (event) => {
       mimeType: data.mimeType,
       clientId: event.source && event.source.id,
     });
+    const port = event.ports && event.ports[0];
+    if (port) {
+      try { port.postMessage({ type: 'session-registered' }); } catch (_) {}
+      try { port.close(); } catch (_) {}
+    }
   } else if (data.type === 'unregister-session') {
     sessions.delete(data.sessionId);
   }

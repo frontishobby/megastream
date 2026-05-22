@@ -143,11 +143,25 @@ export async function createStreamUrl(node: MegaFileLike): Promise<{ url: string
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
   activeSessions.set(sessionId, node);
-  controller.postMessage({
-    type: 'register-session',
-    sessionId,
-    size: node.size,
-    mimeType: getMimeType(node.name),
+  await new Promise<void>((resolve, reject) => {
+    const channel = new MessageChannel();
+    const timer = setTimeout(() => {
+      try { channel.port1.close(); } catch (_) {}
+      reject(new Error('Service Worker did not acknowledge session registration'));
+    }, 5000);
+    channel.port1.onmessage = (e) => {
+      if (e.data && e.data.type === 'session-registered') {
+        clearTimeout(timer);
+        try { channel.port1.close(); } catch (_) {}
+        resolve();
+      }
+    };
+    controller.postMessage({
+      type: 'register-session',
+      sessionId,
+      size: node.size,
+      mimeType: getMimeType(node.name),
+    }, [channel.port2]);
   });
 
   return {
