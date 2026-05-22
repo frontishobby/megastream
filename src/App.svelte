@@ -2,7 +2,7 @@
   import type { Storage, File as MegaFile } from 'megajs';
   import Navbar from './lib/components/Navbar.svelte';
   import FileCard from './lib/components/FileCard.svelte';
-  import VideoPlayer from './lib/components/VideoPlayer.svelte';
+  import VideoView from './lib/components/VideoView.svelte';
   import LoginScreen from './lib/components/LoginScreen.svelte';
   import { MegaService, type MegaNode } from './lib/mega';
   import {
@@ -11,6 +11,7 @@
     clearSession,
     hasSavedSession,
   } from './lib/session';
+  import { router, navigate } from './lib/router.svelte';
   import { Loader2, AlertCircle } from '@lucide/svelte';
   import './app.css';
 
@@ -26,8 +27,44 @@
   let nodes = $state<MegaNode[]>([]);
   let restoring = $state(hasSavedSession());
   let error = $state<string | null>(null);
-  let selectedVideo = $state<MegaNode | null>(null);
   let quota = $state<Quota | null>(null);
+
+  const selectedVideo = $derived.by<MegaNode | null>(() => {
+    const r = router.current;
+    if (r.kind !== 'file' || !storage) return null;
+    const file = (storage as unknown as { files: Record<string, MegaFile> }).files[r.id];
+    if (!file || file.directory) return null;
+    return {
+      name: file.name || 'Unknown',
+      size: file.size,
+      type: 'file',
+      id: r.id,
+      memo: readMemoFromFile(file),
+      node: file,
+    };
+  });
+
+  function readMemoFromFile(file: MegaFile): string | undefined {
+    const attrs = (file as unknown as { attributes?: { _memo?: unknown } }).attributes;
+    const m = attrs?._memo;
+    return typeof m === 'string' && m.length > 0 ? m : undefined;
+  }
+
+  $effect(() => {
+    // When entering the detail view via direct URL, rebuild the breadcrumb
+    // path from the file's parent chain so the Back button + Navbar match.
+    if (!selectedVideo || !storage) return;
+    const parents: MegaFile[] = [];
+    let cur: MegaFile | undefined = selectedVideo.node.parent;
+    while (cur) {
+      parents.unshift(cur);
+      cur = cur.parent;
+    }
+    if (parents.length === 0) return;
+    pathFolders = parents;
+    const target = parents[parents.length - 1];
+    nodes = MegaService.listChildren(target);
+  });
 
   const pathDisplay = $derived(
     pathFolders.map((f, i) => ({
@@ -95,7 +132,7 @@
     storage = null;
     pathFolders = [];
     nodes = [];
-    selectedVideo = null;
+    navigate({ kind: 'home' });
     quota = null;
     error = null;
   }
@@ -105,7 +142,7 @@
       pathFolders = [...pathFolders, node.node];
       nodes = MegaService.listChildren(node.node);
     } else if (MegaService.isVideo(node.name)) {
-      selectedVideo = node;
+      navigate({ kind: 'file', id: node.id });
     }
   }
 
@@ -113,6 +150,12 @@
     pathFolders = pathFolders.slice(0, index + 1);
     const target = pathFolders[pathFolders.length - 1];
     nodes = MegaService.listChildren(target);
+    if (router.current.kind !== 'home') navigate({ kind: 'home' });
+  }
+
+  function handleBack() {
+    if (history.length > 1) history.back();
+    else navigate({ kind: 'home' });
   }
 </script>
 
@@ -135,24 +178,33 @@
       onLogout={handleLogout}
     />
 
-    <main class="flex-1 container mx-auto p-4 md:p-8">
-      {#if error}
-        <div class="bg-red-900/20 border border-red-900/50 text-red-400 p-4 rounded-lg flex items-center gap-3 mb-8">
-          <AlertCircle size={20} />
-          <p>{error}</p>
-        </div>
-      {/if}
+    {#if selectedVideo}
+      <VideoView node={selectedVideo} onBack={handleBack} />
+    {:else if router.current.kind === 'file'}
+      <main class="flex-1 container mx-auto p-4 md:p-8 flex flex-col items-center justify-center text-gray-500 gap-3">
+        <Loader2 class="text-red-500 animate-spin" size={32} />
+        <p class="text-sm">Loading file…</p>
+      </main>
+    {:else}
+      <main class="flex-1 container mx-auto p-4 md:p-8">
+        {#if error}
+          <div class="bg-red-900/20 border border-red-900/50 text-red-400 p-4 rounded-lg flex items-center gap-3 mb-8">
+            <AlertCircle size={20} />
+            <p>{error}</p>
+          </div>
+        {/if}
 
-      {#if nodes.length > 0}
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {#each nodes as node (node.id)}
-            <FileCard {node} onSelect={handleSelect} />
-          {/each}
-        </div>
-      {:else}
-        <div class="text-center py-20 text-gray-500">This folder is empty.</div>
-      {/if}
-    </main>
+        {#if nodes.length > 0}
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            {#each nodes as node (node.id)}
+              <FileCard {node} onSelect={handleSelect} />
+            {/each}
+          </div>
+        {:else}
+          <div class="text-center py-20 text-gray-500">This folder is empty.</div>
+        {/if}
+      </main>
+    {/if}
 
     <footer class="p-6 text-center text-gray-600 text-sm border-t border-gray-900 mt-auto">
       <p>
@@ -161,10 +213,6 @@
         <a href="https://github.com/tonygomes/megajs" class="text-blue-500 hover:underline">megajs</a>.
       </p>
     </footer>
-
-    {#if selectedVideo}
-      <VideoPlayer node={selectedVideo} onClose={() => (selectedVideo = null)} />
-    {/if}
   </div>
 {/if}
 
