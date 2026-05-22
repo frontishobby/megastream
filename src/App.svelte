@@ -55,19 +55,29 @@
     return typeof m === 'string' && m.length > 0 ? m : undefined;
   }
 
+  function resolveFolderFromRoute(s: Storage): MegaFile {
+    const root = s.root as unknown as MegaFile;
+    const r = router.current;
+    if (r.kind === 'home') return root;
+    const lookup = (s as unknown as { files: Record<string, MegaFile> }).files[r.id];
+    if (!lookup) return root;
+    if (r.kind === 'file') return lookup.parent ?? root;
+    return lookup.directory ? lookup : root;
+  }
+
   $effect(() => {
-    // When entering the detail view via direct URL, rebuild the breadcrumb
-    // path from the file's parent chain so the Back button + Navbar match.
-    if (!selectedVideo || !storage) return;
-    const parents: MegaFile[] = [];
-    let cur: MegaFile | undefined = selectedVideo.node.parent;
+    // Route + storage are the source of truth for which folder is open.
+    // Recomputing here means rename-then-back, direct URL entry, and browser
+    // refresh all converge on the same listing.
+    if (!storage) return;
+    const target = resolveFolderFromRoute(storage);
+    const path: MegaFile[] = [];
+    let cur: MegaFile | undefined = target;
     while (cur) {
-      parents.unshift(cur);
+      path.unshift(cur);
       cur = cur.parent;
     }
-    if (parents.length === 0) return;
-    pathFolders = parents;
-    const target = parents[parents.length - 1];
+    pathFolders = path;
     nodes = MegaService.listChildren(target);
   });
 
@@ -98,8 +108,6 @@
 
   function setStorage(s: Storage) {
     storage = s;
-    pathFolders = [s.root as unknown as MegaFile];
-    nodes = MegaService.listChildren(s.root as unknown as MegaFile);
     error = null;
     refreshQuota(s);
     (s as unknown as { on: (e: string, l: (f: MegaFile) => void) => void }).on('add', onNodeAdded);
@@ -168,18 +176,21 @@
 
   function handleSelect(node: MegaNode) {
     if (node.type === 'folder') {
-      pathFolders = [...pathFolders, node.node];
-      nodes = MegaService.listChildren(node.node);
+      navigate({ kind: 'folder', id: node.id });
     } else if (MegaService.isVideo(node.name)) {
       navigate({ kind: 'file', id: node.id });
     }
   }
 
   function handleNavigate(index: number) {
-    pathFolders = pathFolders.slice(0, index + 1);
-    const target = pathFolders[pathFolders.length - 1];
-    nodes = MegaService.listChildren(target);
-    if (router.current.kind !== 'home') navigate({ kind: 'home' });
+    if (index === 0) {
+      navigate({ kind: 'home' });
+      return;
+    }
+    const target = pathFolders[index];
+    const id = (target as unknown as { nodeId?: string })?.nodeId;
+    if (id) navigate({ kind: 'folder', id });
+    else navigate({ kind: 'home' });
   }
 
   function handleBack() {

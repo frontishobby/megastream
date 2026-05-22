@@ -47,4 +47,11 @@ export class MegaService {
     await (file as MutableFile).setAttributes({ _memo: value } as unknown as JSON);
     return value;
   }
+
+  static async renameFile(file: File, name: string): Promise<string> {
+    const trimmed = name.trim();
+    if (!trimmed) throw new Error('Name cannot be empty');
+    await (file as MutableFile).rename(trimmed);
+    return trimmed;
+  }
 }

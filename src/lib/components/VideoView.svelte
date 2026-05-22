@@ -25,8 +25,19 @@
   let saveError = $state<string | null>(null);
   let textareaEl: HTMLTextAreaElement | undefined = $state();
 
+  let title = $state<string>(untrack(() => node.name));
+  let renaming = $state(false);
+  let nameDraft = $state('');
+  let renameSaving = $state(false);
+  let renameError = $state<string | null>(null);
+  let nameInput: HTMLInputElement | undefined = $state();
+
   $effect(() => {
     memo = node.memo;
+  });
+
+  $effect(() => {
+    title = node.name;
   });
 
   $effect(() => {
@@ -137,6 +148,53 @@
       saveMemo();
     }
   }
+
+  function startRename() {
+    nameDraft = title;
+    renaming = true;
+    renameError = null;
+    queueMicrotask(() => {
+      nameInput?.focus();
+      nameInput?.select();
+    });
+  }
+
+  function cancelRename() {
+    renaming = false;
+    nameDraft = '';
+    renameError = null;
+  }
+
+  async function saveRename() {
+    if (renameSaving) return;
+    if (!nameDraft.trim() || nameDraft.trim() === title) {
+      cancelRename();
+      return;
+    }
+    renameSaving = true;
+    renameError = null;
+    try {
+      const next = await MegaService.renameFile(node.node, nameDraft);
+      title = next;
+      node.name = next;
+      renaming = false;
+      nameDraft = '';
+    } catch (err) {
+      renameError = err instanceof Error ? err.message : 'Failed to rename';
+    } finally {
+      renameSaving = false;
+    }
+  }
+
+  function nameKey(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelRename();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      saveRename();
+    }
+  }
 </script>
 
 <div class="flex-1 w-full max-w-[1920px] mx-auto py-6">
@@ -182,7 +240,60 @@
 
   <div class="mt-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
     <div class="lg:col-span-2 space-y-4">
-      <h1 class="text-2xl font-semibold text-gray-100 break-words">{node.name}</h1>
+      {#if renaming}
+        <div>
+          <div class="flex items-center gap-2">
+            <input
+              bind:this={nameInput}
+              bind:value={nameDraft}
+              onkeydown={nameKey}
+              disabled={renameSaving}
+              maxlength="255"
+              class="flex-1 bg-gray-950 border border-gray-700 rounded px-3 py-2 text-2xl font-semibold text-gray-100 focus:outline-none focus:border-red-500 disabled:opacity-50"
+            />
+            <button
+              type="button"
+              onclick={cancelRename}
+              disabled={renameSaving}
+              class="text-gray-400 hover:text-gray-200 p-2 rounded disabled:opacity-50"
+              title="Cancel (Esc)"
+              aria-label="Cancel rename"
+            >
+              <X size={16} />
+            </button>
+            <button
+              type="button"
+              onclick={saveRename}
+              disabled={renameSaving}
+              class="text-green-400 hover:text-green-300 p-2 rounded disabled:opacity-50"
+              title="Save (Enter)"
+              aria-label="Save rename"
+            >
+              {#if renameSaving}
+                <Loader2 size={16} class="animate-spin" />
+              {:else}
+                <Check size={16} />
+              {/if}
+            </button>
+          </div>
+          {#if renameError}
+            <p class="text-red-400 text-xs mt-1">{renameError}</p>
+          {/if}
+        </div>
+      {:else}
+        <div class="flex items-start gap-2 group">
+          <h1 class="text-2xl font-semibold text-gray-100 break-words flex-1">{title}</h1>
+          <button
+            type="button"
+            onclick={startRename}
+            class="text-gray-500 hover:text-gray-200 p-1 rounded shrink-0 opacity-60 group-hover:opacity-100 transition-opacity"
+            title="Rename"
+            aria-label="Rename"
+          >
+            <Pencil size={16} />
+          </button>
+        </div>
+      {/if}
 
       <section class="bg-gray-900/60 border border-gray-800 rounded-lg p-4">
         <div class="flex items-center justify-between mb-2">
