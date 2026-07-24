@@ -103,9 +103,12 @@ export async function fetchFileAttribute(
   const entry = entries.find((e) => e.type === type);
   if (!entry) return null;
 
+  // file.key is the merged 32-byte node key; FAs are encrypted with the
+  // 16-byte AES key obtained by XORing its halves (megajs unmergeKeyMac).
   const rawKey = file.key as Uint8Array | null;
-  if (!rawKey || rawKey.length < 16) return null;
-  const keyBytes = new Uint8Array(rawKey.buffer, rawKey.byteOffset, 16);
+  if (!rawKey || rawKey.length < 32) return null;
+  const keyBytes = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) keyBytes[i] = rawKey[i] ^ rawKey[i + 16];
 
   const handleBytes = b64UrlDecode(entry.hash);
   if (handleBytes.length !== 8) return null;

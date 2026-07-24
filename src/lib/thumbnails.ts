@@ -4,7 +4,8 @@ import type { File as MegaFile } from 'megajs';
 
 const DB_NAME = 'megastream';
 const STORE = 'thumbnails';
-const DB_VERSION = 1;
+// v2: clear thumbnails cached with the wrong FA decryption key
+const DB_VERSION = 2;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -14,9 +15,10 @@ function openDb(): Promise<IDBDatabase> {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
-      if (!db.objectStoreNames.contains(STORE)) {
-        db.createObjectStore(STORE);
+      if (db.objectStoreNames.contains(STORE)) {
+        db.deleteObjectStore(STORE);
       }
+      db.createObjectStore(STORE);
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
