@@ -4,6 +4,7 @@
   import type { MegaNode } from '../mega';
   import { MegaService } from '../mega';
   import { createStreamUrl } from '../stream';
+  import { attachTsPlayer, isTransportStream } from '../tsPlayer';
 
   let { node, onBack } = $props<{
     node: MegaNode;
@@ -40,7 +41,10 @@
     title = node.name;
   });
 
+  const tsMode = $derived(isTransportStream(node.name));
+
   $effect(() => {
+    if (tsMode) return;
     let cleanupFn: (() => void) | null = null;
     let cancelled = false;
 
@@ -71,6 +75,43 @@
     return () => {
       cancelled = true;
       cleanupFn?.();
+    };
+  });
+
+  // MPEG-TS path: browsers can't play .ts natively, so transmux to fMP4
+  // through MediaSource. Needs the <video> element to exist first.
+  $effect(() => {
+    if (!tsMode || !videoEl) return;
+    const el = videoEl;
+    let cancelled = false;
+    let handle: { destroy(): void } | null = null;
+
+    loading = true;
+    error = null;
+    streamUrl = null;
+    resolution = null;
+    duration = null;
+
+    attachTsPlayer(el, node.node)
+      .then((h) => {
+        if (cancelled) {
+          h.destroy();
+          return;
+        }
+        handle = h;
+        loading = false;
+      })
+      .catch((err: any) => {
+        console.error('TS playback setup error:', err);
+        if (!cancelled) {
+          error = err?.message || 'Failed to play transport stream';
+          loading = false;
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      handle?.destroy();
     };
   });
 
@@ -207,13 +248,8 @@
     <span>Back</span>
   </button>
 
-  <div class="w-full bg-black overflow-hidden aspect-video flex items-center justify-center">
-    {#if loading}
-      <div class="flex flex-col items-center gap-4">
-        <div class="w-12 h-12 border-4 border-red-500 border-t-transparent rounded-full animate-spin"></div>
-        <p class="text-gray-400 animate-pulse">Preparing stream...</p>
-      </div>
-    {:else if error}
+  <div class="w-full bg-black overflow-hidden aspect-video flex items-center justify-center relative">
+    {#if error}
       <div class="bg-gray-800 p-8 rounded-lg text-center max-w-md border border-red-900/50">
         <p class="text-red-400 mb-4 font-medium">{error}</p>
         <button
@@ -224,17 +260,25 @@
           Back
         </button>
       </div>
-    {:else if streamUrl}
-      <video
-        bind:this={videoEl}
-        src={streamUrl}
-        controls
-        autoplay
-        onloadedmetadata={onLoadedMetadata}
-        class="w-full h-full"
-      >
-        <track kind="captions" />
-      </video>
+    {:else}
+      {#if streamUrl || tsMode}
+        <video
+          bind:this={videoEl}
+          src={streamUrl ?? undefined}
+          controls
+          autoplay
+          onloadedmetadata={onLoadedMetadata}
+          class="w-full h-full"
+        >
+          <track kind="captions" />
+        </video>
+      {/if}
+      {#if loading}
+        <div class="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-black/60 pointer-events-none">
+          <div class="w-12 h-12 border-4 border-red-500 border-t-transparent rounded-full animate-spin"></div>
+          <p class="text-gray-400 animate-pulse">Preparing stream...</p>
+        </div>
+      {/if}
     {/if}
   </div>
 

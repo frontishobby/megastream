@@ -134,14 +134,17 @@
   );
 
   async function handleGenerateThumbnails() {
-    if (!storage || thumbGen || videoNodes.length === 0) return;
-    thumbGen = { done: 0, total: videoNodes.length };
+    if (!storage || thumbGen) return;
+    // .ts can't be captured via <video src> — it plays through the MSE path only
+    const targets = videoNodes.filter((n) => !n.name.toLowerCase().endsWith('.ts'));
+    if (targets.length === 0) return;
+    thumbGen = { done: 0, total: targets.length };
     try {
-      const result = await generateThumbnails(storage, videoNodes, (p) => {
+      const result = await generateThumbnails(storage, targets, (p) => {
         thumbGen = { done: p.done, total: p.total };
       });
       if (result.failed > 0) {
-        error = `Failed to generate ${result.failed} of ${videoNodes.length} thumbnails (unsupported codec or timeout)`;
+        error = `Failed to generate ${result.failed} of ${targets.length} thumbnails (unsupported codec or timeout)`;
       }
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
