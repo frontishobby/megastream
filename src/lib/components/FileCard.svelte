@@ -3,7 +3,7 @@
   import { untrack } from 'svelte';
   import type { MegaNode } from '../mega';
   import { MegaService } from '../mega';
-  import { getThumbnail } from '../thumbnails';
+  import { getStoredThumbnail, thumbnailEvents } from '../thumbnails';
 
   let { node, onSelect } = $props<{
     node: MegaNode;
@@ -165,21 +165,30 @@
     let cancelled = false;
     const el = cardEl;
 
+    const load = () => {
+      thumbnailLoading = true;
+      getStoredThumbnail(node.id, node.node)
+        .then((url) => {
+          if (cancelled || !url) return;
+          thumbnail = url;
+        })
+        .finally(() => {
+          if (!cancelled) thumbnailLoading = false;
+        });
+    };
+
+    const onGenerated = (e: Event) => {
+      if ((e as CustomEvent).detail === node.id) load();
+    };
+    thumbnailEvents.addEventListener('thumbnail', onGenerated);
+
     const observer = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
           if (entry.isIntersecting) {
             observer.disconnect();
             if (cancelled) return;
-            thumbnailLoading = true;
-            getThumbnail(node.id, node.node)
-              .then((url) => {
-                if (cancelled) return;
-                thumbnail = url;
-              })
-              .finally(() => {
-                if (!cancelled) thumbnailLoading = false;
-              });
+            load();
           }
         }
       },
@@ -190,6 +199,7 @@
     return () => {
       cancelled = true;
       observer.disconnect();
+      thumbnailEvents.removeEventListener('thumbnail', onGenerated);
     };
   });
 </script>

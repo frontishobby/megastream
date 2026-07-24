@@ -1,11 +1,15 @@
 import { createStreamUrl } from './stream';
-import { fetchFileAttribute } from './fileAttribute';
-import type { File as MegaFile } from 'megajs';
+import type { Storage, MutableFile } from 'megajs';
 
 const DB_NAME = 'megastream';
 const STORE = 'thumbnails';
-// v2: clear thumbnails cached with the wrong FA decryption key
-const DB_VERSION = 2;
+// v3: thumbnails now come from the .megastream folder; clear FA-era entries
+const DB_VERSION = 3;
+
+export const THUMB_FOLDER = '.megastream';
+
+// Fired with the video node id as detail whenever a thumbnail becomes available.
+export const thumbnailEvents = new EventTarget();
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -81,7 +85,14 @@ interface MegaFileLike {
   download(opts: { start: number; end: number; maxConnections?: number }): any;
 }
 
-async function captureFrame(node: MegaFileLike): Promise<string> {
+type ThumbExt = 'webp' | 'jpg';
+
+interface CapturedFrame {
+  dataUrl: string;
+  ext: ThumbExt;
+}
+
+async function captureFrame(node: MegaFileLike): Promise<CapturedFrame> {
   const { url, cleanup } = await createStreamUrl(node);
   const video = document.createElement('video');
   video.muted = true;
@@ -151,7 +162,12 @@ async function captureFrame(node: MegaFileLike): Promise<string> {
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('canvas context unavailable');
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL('image/jpeg', 0.75);
+    // Safari cannot encode WebP from canvas and silently returns PNG instead
+    const webp = canvas.toDataURL('image/webp', 0.75);
+    if (webp.startsWith('data:image/webp')) {
+      return { dataUrl: webp, ext: 'webp' };
+    }
+    return { dataUrl: canvas.toDataURL('image/jpeg', 0.75), ext: 'jpg' };
   } finally {
     try {
       video.pause();
@@ -164,8 +180,6 @@ async function captureFrame(node: MegaFileLike): Promise<string> {
   }
 }
 
-const inflight = new Map<string, Promise<string | null>>();
-
 function blobToDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -175,50 +189,156 @@ function blobToDataUrl(blob: Blob): Promise<string> {
   });
 }
 
-async function fetchFromMega(node: MegaFile): Promise<string | null> {
-  try {
-    const blob = await fetchFileAttribute(node, 0);
-    if (!blob) return null;
-    return await blobToDataUrl(blob);
-  } catch (err) {
-    console.warn('FA thumbnail fetch failed', err);
-    return null;
-  }
+function dataUrlToBytes(dataUrl: string): Uint8Array {
+  const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+  const bin = atob(base64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 
-export async function getThumbnail(
-  cacheKey: string,
+function thumbFileName(videoId: string, ext: ThumbExt): string {
+  return `${videoId}.${ext}`;
+}
+
+const THUMB_EXTS: ThumbExt[] = ['webp', 'jpg'];
+
+function findThumbFolder(storage: Storage): MutableFile | null {
+  const root = storage.root as unknown as MutableFile;
+  const children = (root.children || []) as MutableFile[];
+  return children.find((c) => c.directory && c.name === THUMB_FOLDER) ?? null;
+}
+
+function findThumbFile(storage: Storage, videoId: string): MutableFile | null {
+  const folder = findThumbFolder(storage);
+  if (!folder) return null;
+  const children = (folder.children || []) as MutableFile[];
+  const names = THUMB_EXTS.map((ext) => thumbFileName(videoId, ext));
+  return children.find((c) => !c.directory && names.includes(c.name || '')) ?? null;
+}
+
+const inflight = new Map<string, Promise<string | null>>();
+
+/**
+ * Loads a previously generated thumbnail: IndexedDB cache first, then the
+ * .megastream folder in the account. Never generates anything on its own.
+ */
+export async function getStoredThumbnail(
+  videoId: string,
   node: MegaFileLike
 ): Promise<string | null> {
-  const cached = await getCached(cacheKey);
+  const cached = await getCached(videoId);
   if (cached) return cached;
 
-  const existing = inflight.get(cacheKey);
+  const existing = inflight.get(videoId);
   if (existing) return existing;
 
   const task = (async () => {
     try {
-      const fromFa = await fetchFromMega(node as unknown as MegaFile);
-      if (fromFa) {
-        await setCached(cacheKey, fromFa);
-        return fromFa;
-      }
-
-      await sem.acquire();
-      try {
-        const dataUrl = await captureFrame(node);
-        await setCached(cacheKey, dataUrl);
-        return dataUrl;
-      } catch (err) {
-        console.warn('Thumbnail generation failed for', node.name, err);
-        return null;
-      } finally {
-        sem.release();
-      }
+      const storage = (node as { storage?: Storage }).storage;
+      if (!storage?.root) return null;
+      const thumbFile = findThumbFile(storage, videoId);
+      if (!thumbFile) return null;
+      const buf = await thumbFile.downloadBuffer({});
+      const mime = thumbFile.name?.endsWith('.webp') ? 'image/webp' : 'image/jpeg';
+      const dataUrl = await blobToDataUrl(
+        new Blob([buf as unknown as BlobPart], { type: mime })
+      );
+      await setCached(videoId, dataUrl);
+      return dataUrl;
+    } catch (err) {
+      console.warn('Thumbnail load failed', err);
+      return null;
     } finally {
-      inflight.delete(cacheKey);
+      inflight.delete(videoId);
     }
   })();
-  inflight.set(cacheKey, task);
+  inflight.set(videoId, task);
   return task;
+}
+
+export interface ThumbGenProgress {
+  done: number;
+  total: number;
+}
+
+export interface ThumbGenResult {
+  generated: number;
+  skipped: number;
+  failed: number;
+}
+
+interface VideoEntry {
+  id: string;
+  name: string;
+  node: MegaFileLike;
+}
+
+async function ensureThumbFolder(storage: Storage): Promise<MutableFile> {
+  const existing = findThumbFolder(storage);
+  if (existing) return existing;
+  const root = storage.root as unknown as MutableFile;
+  return (await root.mkdir({ name: THUMB_FOLDER })) as unknown as MutableFile;
+}
+
+function uploadBytes(folder: MutableFile, name: string, bytes: Uint8Array): Promise<void> {
+  const stream = (folder as unknown as {
+    upload(opts: { name: string; size: number }): {
+      end(data: Uint8Array): void;
+      complete: Promise<unknown>;
+    };
+  }).upload({ name, size: bytes.length });
+  stream.end(bytes);
+  return stream.complete.then(() => undefined);
+}
+
+/**
+ * Generates thumbnails for the given videos and stores them as
+ * `.megastream/<nodeId>.jpg` in the account. Videos that already have a
+ * stored thumbnail are skipped.
+ */
+export async function generateThumbnails(
+  storage: Storage,
+  videos: VideoEntry[],
+  onProgress?: (p: ThumbGenProgress) => void
+): Promise<ThumbGenResult> {
+  const result: ThumbGenResult = { generated: 0, skipped: 0, failed: 0 };
+  if (videos.length === 0) return result;
+
+  const folder = await ensureThumbFolder(storage);
+  const existing = new Set(
+    ((folder.children || []) as MutableFile[]).map((c) => c.name)
+  );
+
+  let done = 0;
+  const report = () => onProgress?.({ done, total: videos.length });
+  report();
+
+  await Promise.all(
+    videos.map(async (video) => {
+      if (THUMB_EXTS.some((ext) => existing.has(thumbFileName(video.id, ext)))) {
+        result.skipped++;
+        done++;
+        report();
+        return;
+      }
+      await sem.acquire();
+      try {
+        const { dataUrl, ext } = await captureFrame(video.node);
+        await uploadBytes(folder, thumbFileName(video.id, ext), dataUrlToBytes(dataUrl));
+        await setCached(video.id, dataUrl);
+        thumbnailEvents.dispatchEvent(new CustomEvent('thumbnail', { detail: video.id }));
+        result.generated++;
+      } catch (err) {
+        console.warn('Thumbnail generation failed for', video.name, err);
+        result.failed++;
+      } finally {
+        sem.release();
+        done++;
+        report();
+      }
+    })
+  );
+
+  return result;
 }

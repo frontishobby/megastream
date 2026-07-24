@@ -14,7 +14,8 @@
   import { router, navigate } from './lib/router.svelte';
   import { enqueueUpload } from './lib/upload.svelte';
   import UploadPanel from './lib/components/UploadPanel.svelte';
-  import { Loader2, AlertCircle, Upload, FolderPlus } from '@lucide/svelte';
+  import { generateThumbnails } from './lib/thumbnails';
+  import { Loader2, AlertCircle, Upload, FolderPlus, ImagePlus } from '@lucide/svelte';
   import './app.css';
 
   interface Quota {
@@ -126,6 +127,28 @@
   }
 
   let creatingFolder = $state(false);
+  let thumbGen = $state<{ done: number; total: number } | null>(null);
+
+  const videoNodes = $derived(
+    nodes.filter((n) => n.type === 'file' && MegaService.isVideo(n.name))
+  );
+
+  async function handleGenerateThumbnails() {
+    if (!storage || thumbGen || videoNodes.length === 0) return;
+    thumbGen = { done: 0, total: videoNodes.length };
+    try {
+      const result = await generateThumbnails(storage, videoNodes, (p) => {
+        thumbGen = { done: p.done, total: p.total };
+      });
+      if (result.failed > 0) {
+        error = `Failed to generate ${result.failed} of ${videoNodes.length} thumbnails (unsupported codec or timeout)`;
+      }
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    } finally {
+      thumbGen = null;
+    }
+  }
 
   async function handleCreateFolder() {
     if (!currentFolder || creatingFolder) return;
@@ -253,6 +276,20 @@
         {/if}
 
         <div class="flex justify-end mb-4 gap-2">
+          <button
+            type="button"
+            onclick={handleGenerateThumbnails}
+            disabled={!currentFolder || !!thumbGen || videoNodes.length === 0}
+            class="inline-flex items-center gap-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 text-sm font-medium px-4 py-2 rounded-full transition-colors"
+          >
+            {#if thumbGen}
+              <Loader2 size={16} class="animate-spin" />
+              <span>Thumbnails {thumbGen.done}/{thumbGen.total}</span>
+            {:else}
+              <ImagePlus size={16} />
+              <span>Generate thumbnails</span>
+            {/if}
+          </button>
           <button
             type="button"
             onclick={handleCreateFolder}

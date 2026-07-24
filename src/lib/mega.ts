@@ -1,4 +1,5 @@
 import type { File, MutableFile } from 'megajs';
+import { THUMB_FOLDER } from './thumbnails';
 
 export interface MegaNode {
   name: string;
@@ -25,7 +26,9 @@ function readMemo(file: File): string | undefined {
 
 export class MegaService {
   static listChildren(folder: File): MegaNode[] {
-    const children = folder.children || [];
+    const children = (folder.children || []).filter(
+      (child) => !(child.directory && child.name === THUMB_FOLDER)
+    );
     return children.map((child) => ({
       name: child.name || 'Unknown',
       size: child.size,
