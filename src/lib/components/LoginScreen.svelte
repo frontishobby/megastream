@@ -31,7 +31,7 @@
       <div class="bg-red-600/20 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
         <LogIn class="text-red-500" size={32} />
       </div>
-      <h1 class="text-2xl font-bold mb-2">MegaStream</h1>
+      <h1 class="text-2xl font-bold mb-2">MegaPlay</h1>
       <p class="text-gray-400 text-sm">Sign in to your Mega.nz account</p>
     </div>
 

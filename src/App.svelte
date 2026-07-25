@@ -336,7 +336,7 @@
 
     <footer class="p-6 text-center text-gray-600 text-sm border-t border-gray-900 mt-auto">
       <p>
-        &copy; 2026 MegaStream. Powered by
+        &copy; 2026 MegaPlay. Powered by
         <a href="https://svelte.dev" class="text-red-500 hover:underline">Svelte 5</a> &
         <a href="https://github.com/tonygomes/megajs" class="text-blue-500 hover:underline">megajs</a>.
       </p>

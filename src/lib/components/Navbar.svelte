@@ -22,7 +22,7 @@
     <div class="flex flex-col md:flex-row items-stretch md:items-center gap-4">
       <div class="flex items-center gap-2 flex-shrink-0">
         <Play class="text-red-500 fill-current" size={28} />
-        <h1 class="text-xl font-bold tracking-tight">MegaStream</h1>
+        <h1 class="text-xl font-bold tracking-tight">MegaPlay</h1>
       </div>
       <div class="flex-1 min-w-0">
         <Breadcrumb {path} {onNavigate} />

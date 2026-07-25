@@ -3,7 +3,7 @@ import { svelte } from '@sveltejs/vite-plugin-svelte'
 
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => ({
-  base: mode === 'production' ? '/megastream/' : '/',
+  base: '/',
   plugins: [svelte()],
   define: {
     'global': 'globalThis',
