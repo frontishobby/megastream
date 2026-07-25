@@ -135,8 +135,7 @@
 
   async function handleGenerateThumbnails() {
     if (!storage || thumbGen) return;
-    // .ts can't be captured via <video src> — it plays through the MSE path only
-    const targets = videoNodes.filter((n) => !n.name.toLowerCase().endsWith('.ts'));
+    const targets = videoNodes;
     if (targets.length === 0) return;
     thumbGen = { done: 0, total: targets.length };
     try {

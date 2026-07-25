@@ -1,4 +1,5 @@
 import { createStreamUrl } from './stream';
+import { attachTsPlayer, isTransportStream, type TsPlayerHandle } from './tsPlayer';
 import type { Storage, MutableFile } from 'megajs';
 
 const DB_NAME = 'megastream';
@@ -92,7 +93,77 @@ interface CapturedFrame {
   ext: ThumbExt;
 }
 
+function encodeFrame(video: HTMLVideoElement): CapturedFrame {
+  const maxW = 480;
+  const vw = video.videoWidth || 16;
+  const vh = video.videoHeight || 9;
+  const scale = Math.min(1, maxW / vw);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(vw * scale);
+  canvas.height = Math.round(vh * scale);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('canvas context unavailable');
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  // Safari cannot encode WebP from canvas and silently returns PNG instead
+  const webp = canvas.toDataURL('image/webp', 0.75);
+  if (webp.startsWith('data:image/webp')) {
+    return { dataUrl: webp, ext: 'webp' };
+  }
+  return { dataUrl: canvas.toDataURL('image/jpeg', 0.75), ext: 'jpg' };
+}
+
+function waitFor(
+  video: HTMLVideoElement,
+  cond: () => boolean,
+  timeoutMs: number,
+  message: string
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    const tick = () => {
+      if (video.error) return reject(new Error(`video error: ${video.error.message || video.error.code}`));
+      if (cond()) return resolve();
+      if (Date.now() > deadline) return reject(new Error(message));
+      window.setTimeout(tick, 200);
+    };
+    tick();
+  });
+}
+
+// .ts can't be captured via <video src>; route it through the MSE transmuxer.
+async function captureFrameTs(node: MegaFileLike): Promise<CapturedFrame> {
+  const video = document.createElement('video');
+  video.muted = true;
+  video.preload = 'auto';
+  video.playsInline = true;
+  let handle: TsPlayerHandle | null = null;
+  try {
+    handle = await attachTsPlayer(video, node);
+    await waitFor(video, () => video.readyState >= 1, 20000, 'metadata timeout');
+    video.currentTime = handle.duration * 0.5;
+    // The TS player may re-target the seek to where the probe actually
+    // landed, so wait until a decodable frame exists at the final position.
+    await waitFor(
+      video,
+      () => !video.seeking && video.readyState >= 2 && video.videoWidth > 0,
+      45000,
+      'seek timeout'
+    );
+    return encodeFrame(video);
+  } finally {
+    if (handle) {
+      handle.destroy();
+    } else {
+      video.removeAttribute('src');
+      try {
+        video.load();
+      } catch (_) {}
+    }
+  }
+}
+
 async function captureFrame(node: MegaFileLike): Promise<CapturedFrame> {
+  if (isTransportStream(node.name)) return captureFrameTs(node);
   const { url, cleanup } = await createStreamUrl(node);
   const video = document.createElement('video');
   video.muted = true;
@@ -152,22 +223,7 @@ async function captureFrame(node: MegaFileLike): Promise<CapturedFrame> {
       video.currentTime = targetTime;
     });
 
-    const maxW = 480;
-    const vw = video.videoWidth || 16;
-    const vh = video.videoHeight || 9;
-    const scale = Math.min(1, maxW / vw);
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.round(vw * scale);
-    canvas.height = Math.round(vh * scale);
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('canvas context unavailable');
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    // Safari cannot encode WebP from canvas and silently returns PNG instead
-    const webp = canvas.toDataURL('image/webp', 0.75);
-    if (webp.startsWith('data:image/webp')) {
-      return { dataUrl: webp, ext: 'webp' };
-    }
-    return { dataUrl: canvas.toDataURL('image/jpeg', 0.75), ext: 'jpg' };
+    return encodeFrame(video);
   } finally {
     try {
       video.pause();
