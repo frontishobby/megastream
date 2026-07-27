@@ -217,6 +217,11 @@
     error = null;
   }
 
+  function handleDeleted(node: MegaNode) {
+    nodes = nodes.filter((n) => n.id !== node.id);
+    if (storage) refreshQuota(storage);
+  }
+
   function handleSelect(node: MegaNode) {
     if (node.type === 'folder') {
       navigate({ kind: 'folder', id: node.id });
@@ -315,7 +320,7 @@
         {#if nodes.length > 0}
           <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {#each nodes as node (node.id)}
-              <FileCard {node} onSelect={handleSelect} />
+              <FileCard {node} onSelect={handleSelect} onDeleted={handleDeleted} />
             {/each}
           </div>
         {:else}

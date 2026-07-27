@@ -57,4 +57,9 @@ export class MegaService {
     await (file as MutableFile).rename(trimmed);
     return trimmed;
   }
+
+  static async deleteFile(file: File): Promise<void> {
+    // Non-permanent: moves the node to MEGA's Rubbish Bin so it can be recovered.
+    await (file as MutableFile).delete(false);
+  }
 }

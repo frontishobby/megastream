@@ -1,13 +1,14 @@
 <script lang="ts">
-  import { File, Folder, Play, StickyNote, Pencil, Check, X, Loader2 } from '@lucide/svelte';
+  import { File, Folder, Play, StickyNote, Pencil, Trash2, Check, X, Loader2 } from '@lucide/svelte';
   import { untrack } from 'svelte';
   import type { MegaNode } from '../mega';
   import { MegaService } from '../mega';
   import { getStoredThumbnail, thumbnailEvents } from '../thumbnails';
 
-  let { node, onSelect } = $props<{
+  let { node, onSelect, onDeleted } = $props<{
     node: MegaNode;
     onSelect: (node: MegaNode) => void;
+    onDeleted: (node: MegaNode) => void;
   }>();
 
   const isVideo = $derived(node.type === 'file' && MegaService.isVideo(node.name));
@@ -157,6 +158,25 @@
     } else if (e.key === 'Enter') {
       e.preventDefault();
       saveRename();
+    }
+  }
+
+  let deleting = $state(false);
+  let deleteError = $state<string | null>(null);
+
+  async function handleDelete(e: MouseEvent) {
+    e.stopPropagation();
+    if (deleting) return;
+    const label = node.type === 'folder' ? 'folder and its contents' : 'file';
+    if (!window.confirm(`Move this ${label} to the Rubbish Bin?\n\n${title}`)) return;
+    deleting = true;
+    deleteError = null;
+    try {
+      await MegaService.deleteFile(node.node);
+      onDeleted(node);
+    } catch (err) {
+      deleteError = err instanceof Error ? err.message : 'Failed to delete';
+      deleting = false;
     }
   }
 
@@ -313,7 +333,24 @@
         >
           <Pencil size={12} />
         </button>
+        <button
+          type="button"
+          onclick={handleDelete}
+          disabled={deleting}
+          class="text-gray-500 hover:text-red-400 p-0.5 rounded shrink-0 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity disabled:opacity-100"
+          title="Delete"
+          aria-label="Delete"
+        >
+          {#if deleting}
+            <Loader2 size={12} class="animate-spin" />
+          {:else}
+            <Trash2 size={12} />
+          {/if}
+        </button>
       </div>
+    {/if}
+    {#if deleteError}
+      <p class="text-red-400 text-[11px] mt-1">{deleteError}</p>
     {/if}
     <p class="text-gray-400 text-xs mt-1" data-card-surface>
       {node.type === 'folder' ? 'Folder' : formatSize(node.size)}
