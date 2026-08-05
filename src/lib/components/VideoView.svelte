@@ -285,6 +285,7 @@
           src={streamUrl ?? undefined}
           controls
           autoplay
+          playsinline
           onloadedmetadata={onLoadedMetadata}
           onerror={onVideoError}
           class="w-full h-full"

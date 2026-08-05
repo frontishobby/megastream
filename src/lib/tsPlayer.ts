@@ -297,11 +297,27 @@ export async function attachTsPlayer(
   if (!(duration > 0)) throw new Error('Could not determine duration');
 
   const mime = mimeFromInit(transmuxProbe(head));
-  if (!('MediaSource' in window) || !MediaSource.isTypeSupported(mime)) {
+  // iPhone Safari has no usable MediaSource (the property can even exist on
+  // window with an undefined value) but ships ManagedMediaSource since 17.1.
+  const w = window as unknown as {
+    MediaSource?: typeof MediaSource;
+    ManagedMediaSource?: typeof MediaSource;
+  };
+  const MS = [w.MediaSource, w.ManagedMediaSource].find(
+    (impl) => impl && typeof impl.isTypeSupported === 'function'
+  );
+  if (!MS) {
+    throw new Error('This browser does not support MediaSource playback');
+  }
+  if (!MS.isTypeSupported(mime)) {
     throw new Error(`Browser cannot play these codecs: ${mime}`);
   }
 
-  const mediaSource = new MediaSource();
+  const mediaSource = new MS();
+  if (MS === w.ManagedMediaSource) {
+    // ManagedMediaSource refuses to stream while AirPlay is a candidate
+    (video as HTMLVideoElement & { disableRemotePlayback: boolean }).disableRemotePlayback = true;
+  }
   const objectUrl = URL.createObjectURL(mediaSource);
   video.src = objectUrl;
   await new Promise<void>((resolve, reject) => {
@@ -369,9 +385,25 @@ export async function attachTsPlayer(
               return;
             } catch (_) {}
           }
+          // Nothing safe to evict yet — retry once playback has advanced.
+          // Without this the append never retries (no updateend fires) and
+          // playback deadlocks.
+          setTimeout(pump, 1000);
+          return;
         }
         console.warn('appendBuffer failed', err);
-        showToast(`Media buffer append failed — playback may stop (${(err as Error).name})`);
+        const ve = video.error;
+        showToast(
+          `Media buffer append failed (${(err as Error).name}` +
+            (ve ? `; media error ${ve.code}${ve.message ? `: ${ve.message}` : ''}` : '') +
+            ')'
+        );
+        // The media element or MediaSource is in a fatal state — appends can
+        // never succeed again, so stop downloading instead of burning quota.
+        if (ve || mediaSource.readyState === 'closed') {
+          destroyed = true;
+          aborter.abort();
+        }
       }
       return;
     }
