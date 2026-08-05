@@ -14,6 +14,7 @@
   import { router, navigate } from './lib/router.svelte';
   import { enqueueUpload } from './lib/upload.svelte';
   import UploadPanel from './lib/components/UploadPanel.svelte';
+  import ToastHost from './lib/components/ToastHost.svelte';
   import { generateThumbnails } from './lib/thumbnails';
   import { Loader2, AlertCircle, Upload, FolderPlus, ImagePlus } from '@lucide/svelte';
   import './app.css';
@@ -347,6 +348,8 @@
     </footer>
   </div>
 {/if}
+
+<ToastHost />
 
 <style>
   :global(body) {

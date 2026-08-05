@@ -1,3 +1,5 @@
+import { showStreamErrorToast } from './toast.svelte';
+
 interface MegaFileLike {
   size: number;
   name: string;
@@ -100,6 +102,7 @@ function handleFetchRange(req: FetchRangeMessage, port: MessagePort) {
 
   stream.on('error', (err: Error) => {
     if (cancelled) return;
+    showStreamErrorToast('Streaming failed', err);
     safePost(port, { type: 'error', message: err?.message || 'megajs stream error' });
     safeClose(port);
   });

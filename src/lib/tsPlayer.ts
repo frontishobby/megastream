@@ -1,4 +1,5 @@
 import muxjs from 'mux.js';
+import { showToast, showStreamErrorToast } from './toast.svelte';
 
 // Plays MPEG-TS files through MediaSource by transmuxing to fragmented MP4
 // with mux.js. Browsers cannot play .ts containers natively. Seeking is
@@ -370,6 +371,7 @@ export async function attachTsPlayer(
           }
         }
         console.warn('appendBuffer failed', err);
+        showToast(`Media buffer append failed — playback may stop (${(err as Error).name})`);
       }
       return;
     }
@@ -471,6 +473,7 @@ export async function attachTsPlayer(
           fetchedSinceSeek += data.byteLength;
           if (fetchedSinceSeek > Math.max(64 * 1024 * 1024, chunkSize * 6)) {
             console.error('TS seek produced no playable data, giving up');
+            showToast('Seek failed: no playable data found near the target position');
             try {
               if (mediaSource.readyState === 'open') mediaSource.endOfStream('network');
             } catch (_) {}
@@ -493,6 +496,7 @@ export async function attachTsPlayer(
     } catch (err) {
       if (destroyed || gen !== generation || (err as Error).name === 'AbortError') return;
       console.error('TS streaming failed', err);
+      showStreamErrorToast('Streaming failed', err);
       try {
         if (mediaSource.readyState === 'open') mediaSource.endOfStream('network');
       } catch (_) {}
@@ -561,6 +565,7 @@ export async function attachTsPlayer(
     } catch (err) {
       if (destroyed || gen !== generation || (err as Error).name === 'AbortError') return;
       console.error('TS seek failed', err);
+      showStreamErrorToast('Seek failed', err);
     }
   }
 

@@ -5,6 +5,7 @@
   import { MegaService } from '../mega';
   import { createStreamUrl } from '../stream';
   import { attachTsPlayer, isTransportStream } from '../tsPlayer';
+  import { showToast } from '../toast.svelte';
 
   let { node, onBack } = $props<{
     node: MegaNode;
@@ -114,6 +115,23 @@
       handle?.destroy();
     };
   });
+
+  // Mid-playback failures (decode error, network drop, service worker losing
+  // the session) surface only on the <video> element, not as setup errors.
+  function onVideoError() {
+    const e = videoEl?.error;
+    if (!e) return;
+    // src teardown during cleanup fires a spurious "empty src" error
+    if (e.code === 4 && !videoEl?.currentSrc) return;
+    const codes: Record<number, string> = {
+      1: 'playback aborted',
+      2: 'network error while streaming',
+      3: 'video decode failed (corrupt data or unsupported codec)',
+      4: 'video format not supported',
+    };
+    const detail = e.message ? ` — ${e.message}` : '';
+    showToast(`Playback stopped: ${codes[e.code] ?? 'unknown error'}${detail}`);
+  }
 
   function onLoadedMetadata() {
     if (!videoEl) return;
@@ -268,6 +286,7 @@
           controls
           autoplay
           onloadedmetadata={onLoadedMetadata}
+          onerror={onVideoError}
           class="w-full h-full"
         >
           <track kind="captions" />
