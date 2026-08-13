@@ -18,6 +18,7 @@
   import ToastHost from './lib/components/ToastHost.svelte';
   import { generateThumbnails } from './lib/thumbnails';
   import { generateScenes } from './lib/scenes';
+  import { resolveSceneAnalysisMode } from './lib/labeler';
   import { Loader2, AlertCircle, Upload, FolderPlus, Folder, ImagePlus, Film } from '@lucide/svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import './app.css';
@@ -198,10 +199,15 @@
     if (!storage || sceneGen) return;
     const targets = videoNodes;
     if (targets.length === 0) return;
+    const mode = await resolveSceneAnalysisMode();
+    if (mode === 'skip') return;
     sceneGen = { done: 0, total: targets.length };
     try {
-      const result = await generateScenes(storage, targets, (p) => {
-        sceneGen = { done: p.done, total: p.total };
+      const result = await generateScenes(storage, targets, {
+        withLabels: mode === 'labeled',
+        onProgress: (p) => {
+          sceneGen = { done: p.done, total: p.total };
+        },
       });
       if (result.failed > 0) {
         error = `Scene detection failed for ${result.failed} of ${targets.length} videos (unsupported codec or stream error)`;
@@ -237,11 +243,14 @@
     input.value = '';
   }
 
-  function uploadFiles(files: File[]) {
+  async function uploadFiles(files: File[]) {
     if (!currentFolder) return;
     const folder = currentFolder as unknown as Parameters<typeof enqueueUpload>[0];
+    // One labeler probe (and at most one fallback prompt) per batch.
+    const hasVideo = files.some((f) => MegaService.isVideo(f.name));
+    const mode = hasVideo ? await resolveSceneAnalysisMode() : 'skip';
     for (const file of files) {
-      enqueueUpload(folder, file);
+      enqueueUpload(folder, file, mode);
     }
   }
 

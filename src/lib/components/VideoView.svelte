@@ -13,6 +13,7 @@
     type Scene,
     type SceneData,
   } from '../scenes';
+  import { resolveSceneAnalysisMode } from '../labeler';
   import type { Storage } from 'megajs';
   import { showToast } from '../toast.svelte';
 
@@ -57,6 +58,7 @@
   let scenes = $state<SceneData | null>(null);
   let scenesLoading = $state(true);
   let detecting = $state<{ processed: number; duration: number } | null>(null);
+  let labelProg = $state<{ done: number; total: number } | null>(null);
   let currentTime = $state(0);
 
   $effect(() => {
@@ -113,7 +115,10 @@
 
   async function handleDetectScenes() {
     if (detecting) return;
+    const mode = await resolveSceneAnalysisMode();
+    if (mode === 'skip') return;
     detecting = { processed: 0, duration: 0 };
+    labelProg = null;
     // The scan streams the same file; pause the player so the two transfers
     // don't compete for MEGA's parallel-connection limit (which kills the
     // player's stream with a demuxer read error).
@@ -124,8 +129,12 @@
     } catch (_) {}
     try {
       const data = await detectScenesFromNode(node.node, {
+        withLabels: mode === 'labeled',
         onProgress: (processed, dur) => {
           detecting = { processed, duration: dur };
+        },
+        onLabelProgress: (done, total) => {
+          labelProg = { done, total };
         },
       });
       const storage = (node.node as unknown as { storage?: Storage }).storage;
@@ -137,6 +146,7 @@
       );
     } finally {
       detecting = null;
+      labelProg = null;
       if (wasPlaying) player?.play().catch(() => {});
     }
   }
@@ -422,6 +432,15 @@
               #{scene.i + 1}
             </span>
             <span>{formatDuration(scene.start)}</span>
+            {#if scene.position}
+              <span
+                class="uppercase tracking-wide text-[10px] {activeSceneIndex === scene.i
+                  ? 'text-red-100/90'
+                  : 'text-amber-300/90'}"
+              >
+                {scene.position}
+              </span>
+            {/if}
           </button>
         {/each}
         <button
@@ -434,7 +453,7 @@
         >
           {#if detecting}
             <Loader2 size={12} class="animate-spin" />
-            <span>{detectPct}%</span>
+            <span>{labelProg ? `${labelProg.done}/${labelProg.total}` : `${detectPct}%`}</span>
           {:else}
             <RefreshCw size={12} />
           {/if}
@@ -451,7 +470,9 @@
       >
         {#if detecting}
           <Loader2 size={14} class="animate-spin" />
-          <span>Scanning… {detectPct}%</span>
+          <span>
+            {labelProg ? `Labeling ${labelProg.done}/${labelProg.total}` : `Scanning… ${detectPct}%`}
+          </span>
         {:else}
           <Film size={14} />
           <span>Detect scenes</span>

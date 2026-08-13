@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+onnxruntime-gpu
+pillow
+numpy
+huggingface_hub
+requests

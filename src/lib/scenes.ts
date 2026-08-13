@@ -1,6 +1,7 @@
 import { createStreamUrl } from './stream';
 import { attachTsPlayer, isTransportStream, type TsPlayerHandle } from './tsPlayer';
 import { Semaphore, ensureThumbFolder, findThumbFolder, uploadBytes } from './thumbnails';
+import { classifyFrame } from './labeler';
 import type { Storage, MutableFile } from 'megajs';
 
 export interface Scene {
@@ -42,8 +43,11 @@ export interface SceneDetectOptions {
   peakMargin?: number;
   /** Playback speed for the scan pass. */
   playbackRate?: number;
+  /** After detection, classify each scene's keyframe via the local labeler. */
+  withLabels?: boolean;
   signal?: AbortSignal;
   onProgress?: (processedSec: number, durationSec: number) => void;
+  onLabelProgress?: (done: number, total: number) => void;
 }
 
 const DETECTOR = 'block-peak-v2';
@@ -330,6 +334,71 @@ async function runDetection(
   return { v: 1, duration, detector: DETECTOR, scenes: buildScenes(boundaries, duration, minSceneLen) };
 }
 
+const LABEL_FRAME_MAX_W = 512;
+
+function waitPlayable(video: HTMLVideoElement, timeoutMs: number, message: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    const tick = () => {
+      if (video.error) {
+        return reject(new Error(`video error: ${video.error.message || video.error.code}`));
+      }
+      if (!video.seeking && video.readyState >= 2 && video.videoWidth > 0) return resolve();
+      if (Date.now() > deadline) return reject(new Error(message));
+      window.setTimeout(tick, 200);
+    };
+    tick();
+  });
+}
+
+/**
+ * Seeks to each scene's midpoint on the (already loaded) scan video, captures
+ * a keyframe, and asks the local labeler for a position tag. Best-effort:
+ * frames that fail to seek or classify simply stay untagged.
+ */
+async function labelScenes(
+  video: HTMLVideoElement,
+  data: SceneData,
+  opts: SceneDetectOptions
+): Promise<void> {
+  const { signal, onLabelProgress } = opts;
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const total = data.scenes.length;
+  let done = 0;
+  let labeled = 0;
+  onLabelProgress?.(done, total);
+  for (const scene of data.scenes) {
+    if (signal?.aborted) break;
+    const mid = (scene.start + scene.end) / 2;
+    try {
+      video.currentTime = mid;
+      await waitPlayable(video, 20000, 'label seek timeout');
+      const scale = Math.min(1, LABEL_FRAME_MAX_W / (video.videoWidth || LABEL_FRAME_MAX_W));
+      canvas.width = Math.round((video.videoWidth || 16) * scale);
+      canvas.height = Math.round((video.videoHeight || 9) * scale);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise<Blob | null>((resolve) =>
+        canvas.toBlob(resolve, 'image/jpeg', 0.8)
+      );
+      if (blob) {
+        const label = await classifyFrame(blob);
+        if (label?.position) {
+          scene.position = label.position;
+          scene.confidence = label.confidence;
+          labeled++;
+        }
+      }
+    } catch (err) {
+      console.warn('Scene labelling failed at', mid, err);
+    }
+    done++;
+    onLabelProgress?.(done, total);
+  }
+  if (labeled > 0) data.detector = `${data.detector}+labeler`;
+}
+
 /** Scans a local file (e.g. one that is currently uploading) — no network. */
 export async function detectScenesFromFile(
   file: File,
@@ -343,7 +412,9 @@ export async function detectScenesFromFile(
     await waitMetadata(video);
     const duration = video.duration;
     if (!isFinite(duration) || duration <= 0) throw new Error('invalid duration');
-    return await runDetection(video, duration, opts);
+    const data = await runDetection(video, duration, opts);
+    if (opts.withLabels) await labelScenes(video, data, opts);
+    return data;
   } finally {
     teardownVideo(video);
     URL.revokeObjectURL(url);
@@ -366,7 +437,9 @@ export async function detectScenesFromNode(
         await waitMetadata(video);
         const duration = handle.duration || video.duration;
         if (!isFinite(duration) || duration <= 0) throw new Error('invalid duration');
-        return await runDetection(video, duration, opts);
+        const data = await runDetection(video, duration, opts);
+        if (opts.withLabels) await labelScenes(video, data, opts);
+        return data;
       } finally {
         if (handle) {
           handle.destroy();
@@ -385,7 +458,9 @@ export async function detectScenesFromNode(
       await waitMetadata(video);
       const duration = video.duration;
       if (!isFinite(duration) || duration <= 0) throw new Error('invalid duration');
-      return await runDetection(video, duration, opts);
+      const data = await runDetection(video, duration, opts);
+      if (opts.withLabels) await labelScenes(video, data, opts);
+      return data;
     } finally {
       teardownVideo(video);
       cleanup();
@@ -487,8 +562,9 @@ interface VideoEntry {
 export async function generateScenes(
   storage: Storage,
   videos: VideoEntry[],
-  onProgress?: (p: SceneGenProgress) => void
+  opts: { withLabels?: boolean; onProgress?: (p: SceneGenProgress) => void } = {}
 ): Promise<SceneGenResult> {
+  const { withLabels = false, onProgress } = opts;
   const result: SceneGenResult = { generated: 0, skipped: 0, failed: 0 };
   if (videos.length === 0) return result;
 
@@ -507,7 +583,7 @@ export async function generateScenes(
       continue;
     }
     try {
-      const data = await detectScenesFromNode(video.node);
+      const data = await detectScenesFromNode(video.node, { withLabels });
       await saveScenes(storage, video.id, data);
       result.generated++;
     } catch (err) {

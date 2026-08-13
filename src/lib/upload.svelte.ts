@@ -1,6 +1,7 @@
 import type { MutableFile, Storage } from 'megajs';
 import { MegaService } from './mega';
 import { detectScenesFromFile, saveScenes, type SceneData } from './scenes';
+import type { SceneAnalysisMode } from './labeler';
 
 export type UploadStatus = 'queued' | 'uploading' | 'analyzing' | 'done' | 'error' | 'cancelled';
 
@@ -19,7 +20,12 @@ const AUTO_REMOVE_DONE_MS = 2500;
 
 let _jobs = $state<UploadJob[]>([]);
 let running = 0;
-const queue: Array<{ id: string; file: File; folder: MutableFile }> = [];
+const queue: Array<{
+  id: string;
+  file: File;
+  folder: MutableFile;
+  sceneMode: SceneAnalysisMode;
+}> = [];
 const cancellers = new Map<string, () => void>();
 
 export const uploads = {
@@ -33,7 +39,11 @@ function findJob(id: string): UploadJob | undefined {
   return _jobs.find((j) => j.id === id);
 }
 
-export function enqueueUpload(folder: MutableFile, file: File): UploadJob {
+export function enqueueUpload(
+  folder: MutableFile,
+  file: File,
+  sceneMode: SceneAnalysisMode = 'static'
+): UploadJob {
   const id = crypto.randomUUID
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -46,7 +56,7 @@ export function enqueueUpload(folder: MutableFile, file: File): UploadJob {
     folderId: folder.nodeId || '',
   };
   _jobs.push(job);
-  queue.push({ id, file, folder });
+  queue.push({ id, file, folder, sceneMode });
   drain();
   return findJob(id) ?? job;
 }
@@ -84,7 +94,7 @@ function drain() {
     const job = findJob(next.id);
     if (!job || job.status === 'cancelled') continue;
     running++;
-    run(next.id, next.file, next.folder).finally(() => {
+    run(next.id, next.file, next.folder, next.sceneMode).finally(() => {
       running--;
       cancellers.delete(next.id);
       drain();
@@ -92,7 +102,12 @@ function drain() {
   }
 }
 
-async function run(id: string, file: File, folder: MutableFile) {
+async function run(
+  id: string,
+  file: File,
+  folder: MutableFile,
+  sceneMode: SceneAnalysisMode = 'static'
+) {
   const job = findJob(id);
   if (!job) return;
   job.status = 'uploading';
@@ -102,10 +117,13 @@ async function run(id: string, file: File, folder: MutableFile) {
   // before the last byte is sent.
   let analysisAbort: AbortController | null = null;
   let analysis: Promise<SceneData | null> | null = null;
-  if (MegaService.isVideo(file.name)) {
+  if (sceneMode !== 'skip' && MegaService.isVideo(file.name)) {
     const abort = new AbortController();
     analysisAbort = abort;
-    analysis = detectScenesFromFile(file, { signal: abort.signal }).catch((err) => {
+    analysis = detectScenesFromFile(file, {
+      signal: abort.signal,
+      withLabels: sceneMode === 'labeled',
+    }).catch((err) => {
       if (!abort.signal.aborted) console.warn('Scene analysis failed for', file.name, err);
       return null;
     });
