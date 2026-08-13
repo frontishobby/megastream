@@ -213,6 +213,12 @@ async def classify(request: Request):
         position, conf = None, 0.0
 
     top = dict(sorted(tags.items(), key=lambda kv: -kv[1])[:TOP_TAGS])
+    top3 = ", ".join(f"{k}:{v:.2f}" for k, v in list(top.items())[:3])
+    print(
+        f"classify: {position or 'none'}"
+        + (f" ({conf:.2f}, {source})" if position else "")
+        + (f" | top tags: {top3}" if top3 else "")
+    )
     return {
         "position": position,
         "confidence": round(conf, 3) if position else None,
