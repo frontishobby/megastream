@@ -187,6 +187,18 @@ def pick_position(tags: dict):
     return best_label, best_p
 
 
+def position_scores(tags: dict) -> dict:
+    """Best tag probability per position label — stored client-side so
+    priority thresholds and label groupings can be retuned without a
+    rescan."""
+    out: dict = {}
+    for tag, label in POSITION_TAGS.items():
+        p = tags.get(tag, 0.0)
+        if p > out.get(label, 0.0):
+            out[label] = p
+    return {k: round(v, 3) for k, v in out.items() if v >= 0.1}
+
+
 def vlm_classify(jpeg: bytes):
     prompt = (
         "You are labelling frames from an adult video for the owner's "
@@ -253,5 +265,6 @@ async def classify(request: Request):
         "position": position,
         "confidence": round(conf, 3) if position else None,
         "source": source,
+        "positions": position_scores(tags),
         "tags": {k: round(v, 3) for k, v in top.items()},
     }

@@ -29,6 +29,8 @@ export async function probeLabeler(timeoutMs = 2500): Promise<boolean> {
 export interface FrameLabel {
   position: string | null;
   confidence: number | null;
+  /** Best tag probability per position label (all candidates, not just the winner). */
+  positions: Record<string, number>;
   /** General booru tags for the frame, tag -> confidence. */
   tags: Record<string, number>;
 }
@@ -46,16 +48,20 @@ export async function classifyFrame(frame: Blob, mediaTime?: number): Promise<Fr
     });
     if (!res.ok) return null;
     const data = await res.json();
-    const tags: Record<string, number> = {};
-    if (data.tags && typeof data.tags === 'object') {
-      for (const [tag, conf] of Object.entries(data.tags)) {
-        if (typeof conf === 'number') tags[tag] = conf;
+    const readMap = (obj: unknown): Record<string, number> => {
+      const out: Record<string, number> = {};
+      if (obj && typeof obj === 'object') {
+        for (const [key, val] of Object.entries(obj)) {
+          if (typeof val === 'number') out[key] = val;
+        }
       }
-    }
+      return out;
+    };
     return {
       position: typeof data.position === 'string' ? data.position : null,
       confidence: typeof data.confidence === 'number' ? data.confidence : null,
-      tags,
+      positions: readMap(data.positions),
+      tags: readMap(data.tags),
     };
   } catch (err) {
     console.warn('Frame classification failed', err);

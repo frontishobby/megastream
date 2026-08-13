@@ -25,6 +25,23 @@ export interface VideoTag {
   s: number;
 }
 
+/**
+ * Raw per-frame classification, persisted so smoothing, label groupings,
+ * priority thresholds and tag aggregation can all be recomputed later
+ * WITHOUT rescanning the video (a full-library scan is expensive).
+ */
+export interface SweepSample {
+  t: number;
+  /** chosen position label */
+  p: string | null;
+  /** its confidence */
+  c: number | null;
+  /** every position candidate's best tag probability */
+  pos?: Record<string, number>;
+  /** general tags (conf >= 0.25) */
+  tags?: Record<string, number>;
+}
+
 export interface SceneData {
   v: 1;
   duration: number;
@@ -32,6 +49,8 @@ export interface SceneData {
   scenes: Scene[];
   /** Video-level descriptive tags aggregated across labelled frames. */
   videoTags?: VideoTag[];
+  /** Raw sweep samples (labelled scans only). */
+  samples?: SweepSample[];
 }
 
 interface MegaFileLike {
@@ -374,7 +393,34 @@ async function runDetection(
 }
 
 const LABEL_FRAME_MAX_W = 512;
-const SWEEP_DETECTOR = 'label-sweep-v3';
+// v4: sidecars now include the raw sample sequence.
+const SWEEP_DETECTOR = 'label-sweep-v4';
+const STORED_TAG_MIN = 0.25;
+
+interface InternalSample {
+  t: number;
+  position: string | null;
+  confidence: number | null;
+  positions?: Record<string, number>;
+  tags?: Record<string, number>;
+}
+
+function compactSamples(samples: InternalSample[]): SweepSample[] {
+  return samples.map((s) => {
+    const out: SweepSample = { t: s.t, p: s.position, c: s.confidence };
+    if (s.positions && Object.keys(s.positions).length > 0) {
+      out.pos = s.positions;
+    }
+    if (s.tags) {
+      const kept: Record<string, number> = {};
+      for (const [tag, conf] of Object.entries(s.tags)) {
+        if (conf >= STORED_TAG_MIN) kept[tag] = round2(conf);
+      }
+      if (Object.keys(kept).length > 0) out.tags = kept;
+    }
+    return out;
+  });
+}
 // Vote weight of a "none" sample: low enough that close-up/ambiguous blips
 // get absorbed by surrounding labels, high enough that genuinely idle
 // stretches still win.
@@ -467,12 +513,7 @@ async function runLabelSweep(
 
   let prevT = -Infinity;
   let attempts = 0;
-  const samples: Array<{
-    t: number;
-    position: string | null;
-    confidence: number | null;
-    tags?: Record<string, number>;
-  }> = [];
+  const samples: InternalSample[] = [];
   // Serial classification queue: at 4x playback a sample arrives roughly
   // once per wall-clock second and GPU classification is far faster, so the
   // queue drains as it fills; playback never waits on it.
@@ -507,6 +548,7 @@ async function runLabelSweep(
         t: mediaTime,
         position: label.position,
         confidence: label.confidence,
+        positions: label.positions,
         tags: label.tags,
       });
     });
@@ -525,6 +567,7 @@ async function runLabelSweep(
     detector: SWEEP_DETECTOR,
     scenes: buildLabeledScenes(samples, duration, minSceneLen, labelInterval, smoothWindow),
     videoTags: aggregateVideoTags(samples),
+    samples: compactSamples(samples),
   };
   dumpSweepDebug(samples, data);
   return data;
@@ -583,12 +626,7 @@ async function runLabelSweepSeek(
 ): Promise<SceneData> {
   const { labelInterval = 4, minSceneLen = 30, smoothWindow = 7, signal, onProgress } = opts;
 
-  const samples: Array<{
-    t: number;
-    position: string | null;
-    confidence: number | null;
-    tags?: Record<string, number>;
-  }> = [];
+  const samples: InternalSample[] = [];
   const tasks: Promise<void>[] = [];
   let attempts = 0;
 
@@ -631,6 +669,7 @@ async function runLabelSweepSeek(
           t: at,
           position: label.position,
           confidence: label.confidence,
+          positions: label.positions,
           tags: label.tags,
         });
       })()
@@ -652,6 +691,7 @@ async function runLabelSweepSeek(
     detector: SWEEP_DETECTOR,
     scenes: buildLabeledScenes(samples, duration, minSceneLen, labelInterval, smoothWindow),
     videoTags: aggregateVideoTags(samples),
+    samples: compactSamples(samples),
   };
   dumpSweepDebug(samples, data);
   return data;
@@ -991,8 +1031,11 @@ interface VideoEntry {
 
 /**
  * Detects scenes for the given videos and stores the result as
- * `.megastream/<nodeId>.scenes.json`. Videos that already have scene data
- * are skipped. Sequential on purpose: each scan streams the whole file.
+ * `.megastream/<nodeId>.scenes.json`. Skipping is version-aware in labelled
+ * mode: sidecars from older detectors (static fallback, pre-v4 sweeps) get
+ * re-scanned, so one button press upgrades the whole library and an
+ * interrupted batch resumes where it left off. Sequential on purpose: each
+ * scan streams the whole file.
  */
 export async function generateScenes(
   storage: Storage,
@@ -1011,7 +1054,17 @@ export async function generateScenes(
   report();
 
   for (const video of videos) {
-    if (existing.has(scenesFileName(video.id))) {
+    let skip = false;
+    if (withLabels) {
+      const stored = existing.has(scenesFileName(video.id))
+        ? await getStoredScenes(video.id, video.node)
+        : null;
+      skip = stored?.detector === SWEEP_DETECTOR;
+    } else {
+      // Static fallback can't improve on any existing data.
+      skip = existing.has(scenesFileName(video.id));
+    }
+    if (skip) {
       result.skipped++;
       done++;
       report();
