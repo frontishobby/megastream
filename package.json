@@ -27,7 +27,6 @@
   },
   "dependencies": {
     "buffer": "^6.0.3",
-    "megajs": "^1.3.10",
-    "mux.js": "^6.3.0"
+    "megajs": "^1.3.10"
   }
 }

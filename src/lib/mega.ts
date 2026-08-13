@@ -51,7 +51,7 @@ export class MegaService {
   }
 
   static isVideo(name: string): boolean {
-    const videoExtensions = ['.mp4', '.m4v', '.mkv', '.webm', '.avi', '.mov', '.ogg', '.ogv', '.ts'];
+    const videoExtensions = ['.mp4', '.m4v', '.mkv', '.webm', '.avi', '.mov', '.ogg', '.ogv'];
     return videoExtensions.some((ext) => name.toLowerCase().endsWith(ext));
   }
 

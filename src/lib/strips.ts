@@ -5,7 +5,6 @@
 // videos without scene data keep their single-frame thumbnail.
 
 import { createStreamUrl } from './stream';
-import { isTransportStream } from './tsPlayer';
 import {
   Semaphore,
   ensureThumbFolder,
@@ -229,9 +228,6 @@ export async function generateStripFromNode(
   node: MegaFileLike,
   scenes: SceneData
 ): Promise<CapturedStrip | null> {
-  // Seeking a transmuxed .ts N times is slow and fragile; those keep the
-  // single-frame thumbnail.
-  if (isTransportStream(node.name)) return null;
   const times = pickTimes(scenes);
   if (times.length === 0) return null;
   await stripSem.acquire();

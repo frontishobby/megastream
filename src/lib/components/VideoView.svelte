@@ -4,7 +4,6 @@
   import type { MegaNode } from '../mega';
   import { MegaService } from '../mega';
   import { createStreamUrl } from '../stream';
-  import { attachTsPlayer, isTransportStream } from '../tsPlayer';
   import {
     getStoredScenes,
     detectScenesFromNode,
@@ -51,8 +50,6 @@
   $effect(() => {
     title = node.name;
   });
-
-  const tsMode = $derived(isTransportStream(node.name));
 
   // --- Scene navigation ---
   let scenes = $state<SceneData | null>(null);
@@ -148,7 +145,6 @@
   }
 
   $effect(() => {
-    if (tsMode) return;
     let cleanupFn: (() => void) | null = null;
     let cancelled = false;
 
@@ -179,43 +175,6 @@
     return () => {
       cancelled = true;
       cleanupFn?.();
-    };
-  });
-
-  // MPEG-TS path: browsers can't play .ts natively, so transmux to fMP4
-  // through MediaSource. Needs the <video> element to exist first.
-  $effect(() => {
-    if (!tsMode || !videoEl) return;
-    const el = videoEl;
-    let cancelled = false;
-    let handle: { destroy(): void } | null = null;
-
-    loading = true;
-    error = null;
-    streamUrl = null;
-    resolution = null;
-    duration = null;
-
-    attachTsPlayer(el, node.node)
-      .then((h) => {
-        if (cancelled) {
-          h.destroy();
-          return;
-        }
-        handle = h;
-        loading = false;
-      })
-      .catch((err: any) => {
-        console.error('TS playback setup error:', err);
-        if (!cancelled) {
-          error = err?.message || 'Failed to play transport stream';
-          loading = false;
-        }
-      });
-
-    return () => {
-      cancelled = true;
-      handle?.destroy();
     };
   });
 
@@ -414,10 +373,10 @@
         </button>
       </div>
     {:else}
-      {#if streamUrl || tsMode}
+      {#if streamUrl}
         <video
           bind:this={videoEl}
-          src={streamUrl ?? undefined}
+          src={streamUrl}
           controls
           autoplay
           playsinline

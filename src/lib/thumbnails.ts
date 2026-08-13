@@ -1,5 +1,4 @@
 import { createStreamUrl } from './stream';
-import { attachTsPlayer, isTransportStream, type TsPlayerHandle } from './tsPlayer';
 import type { Storage, MutableFile } from 'megajs';
 
 const DB_NAME = 'megastream';
@@ -112,58 +111,7 @@ function encodeFrame(video: HTMLVideoElement): CapturedFrame {
   return { dataUrl: canvas.toDataURL('image/jpeg', 0.75), ext: 'jpg' };
 }
 
-function waitFor(
-  video: HTMLVideoElement,
-  cond: () => boolean,
-  timeoutMs: number,
-  message: string
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const deadline = Date.now() + timeoutMs;
-    const tick = () => {
-      if (video.error) return reject(new Error(`video error: ${video.error.message || video.error.code}`));
-      if (cond()) return resolve();
-      if (Date.now() > deadline) return reject(new Error(message));
-      window.setTimeout(tick, 200);
-    };
-    tick();
-  });
-}
-
-// .ts can't be captured via <video src>; route it through the MSE transmuxer.
-async function captureFrameTs(node: MegaFileLike): Promise<CapturedFrame> {
-  const video = document.createElement('video');
-  video.muted = true;
-  video.preload = 'auto';
-  video.playsInline = true;
-  let handle: TsPlayerHandle | null = null;
-  try {
-    handle = await attachTsPlayer(video, node);
-    await waitFor(video, () => video.readyState >= 1, 20000, 'metadata timeout');
-    video.currentTime = handle.duration * 0.5;
-    // The TS player may re-target the seek to where the probe actually
-    // landed, so wait until a decodable frame exists at the final position.
-    await waitFor(
-      video,
-      () => !video.seeking && video.readyState >= 2 && video.videoWidth > 0,
-      45000,
-      'seek timeout'
-    );
-    return encodeFrame(video);
-  } finally {
-    if (handle) {
-      handle.destroy();
-    } else {
-      video.removeAttribute('src');
-      try {
-        video.load();
-      } catch (_) {}
-    }
-  }
-}
-
 async function captureFrame(node: MegaFileLike): Promise<CapturedFrame> {
-  if (isTransportStream(node.name)) return captureFrameTs(node);
   const { url, cleanup } = await createStreamUrl(node);
   const video = document.createElement('video');
   video.muted = true;

@@ -1,5 +1,4 @@
 import { createStreamUrl } from './stream';
-import { attachTsPlayer, isTransportStream, type TsPlayerHandle } from './tsPlayer';
 import { Semaphore, ensureThumbFolder, findThumbFolder, uploadBytes } from './thumbnails';
 import { classifyFrame } from './labeler';
 import type { Storage, MutableFile } from 'megajs';
@@ -888,23 +887,6 @@ export async function detectScenesFromNode(
 ): Promise<SceneData> {
   await detectSem.acquire();
   try {
-    if (isTransportStream(node.name)) {
-      const video = makeVideo();
-      let handle: TsPlayerHandle | null = null;
-      try {
-        handle = await attachTsPlayer(video, node);
-        await waitMetadata(video);
-        const duration = handle.duration || video.duration;
-        if (!isFinite(duration) || duration <= 0) throw new Error('invalid duration');
-        return await detectWith(video, duration, opts);
-      } finally {
-        if (handle) {
-          handle.destroy();
-        } else {
-          teardownVideo(video);
-        }
-      }
-    }
     // Fewer connections than playback (4): a scan often runs while the same
     // file is being watched, and MEGA drops requests when too many parallel
     // transfer connections pile up.
