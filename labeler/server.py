@@ -26,6 +26,8 @@ import base64
 import csv
 import io
 import os
+import sys
+from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
@@ -81,9 +83,19 @@ POSITION_TAGS = {
     "fingering": "solo",
 }
 
-# Load CUDA/cuDNN DLLs from the pip-installed NVIDIA wheels; without this,
+# Make the pip-installed NVIDIA wheels' DLLs findable; without this,
 # onnxruntime looks for a system CUDA Toolkit (cublasLt64_12.dll etc.) and
 # silently falls back to CPU when it's not installed.
+#
+# preload_dlls() alone is not enough: cuDNN 9 lazily loads sublibraries
+# (cudnn_engines_tensor_ir64_9.dll etc.) by name at inference time, so the
+# wheel bin directories must also be on the DLL search path and PATH.
+if sys.platform == "win32":
+    _nvidia_root = Path(ort.__file__).resolve().parents[1] / "nvidia"
+    if _nvidia_root.is_dir():
+        for _bin in sorted(_nvidia_root.glob("*/bin")):
+            os.add_dll_directory(str(_bin))
+            os.environ["PATH"] = str(_bin) + os.pathsep + os.environ.get("PATH", "")
 if hasattr(ort, "preload_dlls"):
     try:
         ort.preload_dlls()

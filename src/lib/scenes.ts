@@ -43,11 +43,16 @@ export interface SceneDetectOptions {
   peakMargin?: number;
   /** Playback speed for the scan pass. */
   playbackRate?: number;
-  /** After detection, classify each scene's keyframe via the local labeler. */
+  /**
+   * Use the local labeler to segment: frames are classified every
+   * `labelInterval` seconds and scenes are runs of identical position
+   * labels. Without it, the static cut detector runs instead.
+   */
   withLabels?: boolean;
+  /** Seconds of media time between classified frames in label mode. */
+  labelInterval?: number;
   signal?: AbortSignal;
   onProgress?: (processedSec: number, durationSec: number) => void;
-  onLabelProgress?: (done: number, total: number) => void;
 }
 
 const DETECTOR = 'block-peak-v2';
@@ -152,83 +157,28 @@ function buildScenes(boundaries: number[], duration: number, minSceneLen: number
 }
 
 /**
- * Plays the (muted, sped-up) video once and flags hard cuts. Each sampled
- * frame pair gets a changed-block fraction (how much of the frame changed,
- * not how strongly), and a cut must be a *peak*: a single-sample spike that
- * clearly exceeds both the preceding and following samples. Sustained high
- * fractions (whip pans, close-up motion) never form a peak, and localized
- * motion never changes enough blocks.
+ * Shared playback harness: plays the (muted, sped-up) video once, calling
+ * `onFrame(mediaTime)` for each presented frame. Handles hidden-tab pausing
+ * (rVFC stops firing there, which would silently skip frames), a stall
+ * watchdog, aborts, and MSE streams that never fire `ended`.
  */
-async function runDetection(
+function runPlaybackPass(
   video: HTMLVideoElement,
   duration: number,
-  opts: SceneDetectOptions
-): Promise<SceneData> {
-  const {
-    sampleInterval = 0.2,
-    minSceneLen = 1.5,
-    blockDiff = 25,
-    // A real cut swaps nearly the whole frame; rhythmic motion bursts peak
-    // around 0.4-0.7, so demand a high fraction AND a clear margin over the
-    // neighbours to keep them out.
-    cutFrac = 0.72,
-    peakMargin = 0.3,
-    playbackRate = 4,
-    signal,
-    onProgress,
-  } = opts;
-  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-
-  const canvas = document.createElement('canvas');
-  canvas.width = W;
-  canvas.height = H;
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  if (!ctx) throw new Error('canvas context unavailable');
-
-  const boundaries: number[] = [];
-
-  await new Promise<void>((resolve, reject) => {
-    let prev: Uint8Array | null = null;
-    let prevT = -Infinity;
-    let lastCut = 0;
+  opts: { playbackRate: number; signal?: AbortSignal; onProgress?: SceneDetectOptions['onProgress'] },
+  onFrame: (mediaTime: number) => void
+): Promise<void> {
+  const { playbackRate, signal, onProgress } = opts;
+  if (signal?.aborted) {
+    return Promise.reject(new DOMException('Aborted', 'AbortError'));
+  }
+  return new Promise<void>((resolve, reject) => {
     let settled = false;
-
-    // Peak detection over the sampled change fractions: a sample is decided
-    // only once LOOKAHEAD later samples exist, so both sides of a candidate
-    // spike are known.
-    const LOOKBACK = 3;
-    const LOOKAHEAD = 2;
-    const samples: Array<{ t: number; frac: number }> = [];
-    let decided = 0;
-
-    const decide = (idx: number) => {
-      const s = samples[idx];
-      if (s.frac < cutFrac) return;
-      let maxNeighbor = 0;
-      for (let k = Math.max(0, idx - LOOKBACK); k < idx; k++) {
-        if (samples[k].frac > maxNeighbor) maxNeighbor = samples[k].frac;
-      }
-      const hi = Math.min(samples.length - 1, idx + LOOKAHEAD);
-      for (let k = idx + 1; k <= hi; k++) {
-        if (samples[k].frac > maxNeighbor) maxNeighbor = samples[k].frac;
-      }
-      if (s.frac - maxNeighbor < peakMargin) return;
-      if (s.t - lastCut < minSceneLen) return;
-      boundaries.push(s.t);
-      lastCut = s.t;
-    };
-
-    const drainDecisions = (flush: boolean) => {
-      const limit = flush ? samples.length : samples.length - LOOKAHEAD;
-      while (decided < limit) decide(decided++);
-    };
 
     const rvfc: ((cb: (now: number, meta: { mediaTime: number }) => void) => void) | undefined = (
       video as any
     ).requestVideoFrameCallback?.bind(video);
 
-    // rVFC/rAF stop firing in hidden tabs while the video keeps playing,
-    // which would silently skip cuts — pause the scan instead.
     const onVisibility = () => {
       if (settled) return;
       if (document.hidden) {
@@ -267,12 +217,8 @@ async function runDetection(
       try {
         video.pause();
       } catch (_) {}
-      if (err) {
-        reject(err);
-      } else {
-        drainDecisions(true);
-        resolve();
-      }
+      if (err) reject(err);
+      else resolve();
     };
     const onEnded = () => finish();
     const onError = () =>
@@ -284,34 +230,14 @@ async function runDetection(
     document.addEventListener('visibilitychange', onVisibility);
     signal?.addEventListener('abort', onAbort);
 
-    const sample = (mediaTime: number) => {
-      if (mediaTime - prevT < sampleInterval) return;
-      let gray: Uint8Array;
-      try {
-        ctx.drawImage(video, 0, 0, W, H);
-        const px = ctx.getImageData(0, 0, W, H).data;
-        gray = new Uint8Array(W * H);
-        for (let i = 0, p = 0; i < px.length; i += 4, p++) {
-          gray[p] = (px[i] * 3 + px[i + 1] * 4 + px[i + 2]) >> 3;
-        }
-      } catch (_) {
-        return; // frame not decodable yet
-      }
-      if (prev) {
-        samples.push({ t: mediaTime, frac: changedBlockFraction(gray, prev, blockDiff) });
-        drainDecisions(false);
-      }
-      prev = gray;
-      prevT = mediaTime;
-      onProgress?.(Math.min(mediaTime, duration), duration);
-    };
-
     const tick = (_now?: number, meta?: { mediaTime: number }) => {
       if (settled) return;
       // MSE (.ts) playback may never fire `ended`; treat reaching the known
       // duration as completion too.
       if (video.ended || (duration > 0 && video.currentTime >= duration - 0.3)) return finish();
-      sample(meta ? meta.mediaTime : video.currentTime);
+      const mediaTime = meta ? meta.mediaTime : video.currentTime;
+      onFrame(mediaTime);
+      onProgress?.(Math.min(mediaTime, duration), duration);
       schedule();
     };
     const schedule = () => {
@@ -330,73 +256,261 @@ async function runDetection(
       video.play().catch((err) => finish(err instanceof Error ? err : new Error(String(err))));
     }
   });
+}
+
+/**
+ * Static detector: flags hard cuts. Each sampled frame pair gets a
+ * changed-block fraction (how much of the frame changed, not how strongly),
+ * and a cut must be a *peak*: a single-sample spike that clearly exceeds
+ * both the preceding and following samples. Sustained high fractions (whip
+ * pans, close-up motion) never form a peak, and localized motion never
+ * changes enough blocks.
+ */
+async function runDetection(
+  video: HTMLVideoElement,
+  duration: number,
+  opts: SceneDetectOptions
+): Promise<SceneData> {
+  const {
+    sampleInterval = 0.2,
+    minSceneLen = 1.5,
+    blockDiff = 25,
+    // A real cut swaps nearly the whole frame; rhythmic motion bursts peak
+    // around 0.4-0.7, so demand a high fraction AND a clear margin over the
+    // neighbours to keep them out.
+    cutFrac = 0.72,
+    peakMargin = 0.3,
+    playbackRate = 4,
+    signal,
+    onProgress,
+  } = opts;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('canvas context unavailable');
+
+  const boundaries: number[] = [];
+  let prev: Uint8Array | null = null;
+  let prevT = -Infinity;
+  let lastCut = 0;
+
+  // Peak detection over the sampled change fractions: a sample is decided
+  // only once LOOKAHEAD later samples exist, so both sides of a candidate
+  // spike are known.
+  const LOOKBACK = 3;
+  const LOOKAHEAD = 2;
+  const samples: Array<{ t: number; frac: number }> = [];
+  let decided = 0;
+
+  const decide = (idx: number) => {
+    const s = samples[idx];
+    if (s.frac < cutFrac) return;
+    let maxNeighbor = 0;
+    for (let k = Math.max(0, idx - LOOKBACK); k < idx; k++) {
+      if (samples[k].frac > maxNeighbor) maxNeighbor = samples[k].frac;
+    }
+    const hi = Math.min(samples.length - 1, idx + LOOKAHEAD);
+    for (let k = idx + 1; k <= hi; k++) {
+      if (samples[k].frac > maxNeighbor) maxNeighbor = samples[k].frac;
+    }
+    if (s.frac - maxNeighbor < peakMargin) return;
+    if (s.t - lastCut < minSceneLen) return;
+    boundaries.push(s.t);
+    lastCut = s.t;
+  };
+
+  const drainDecisions = (flush: boolean) => {
+    const limit = flush ? samples.length : samples.length - LOOKAHEAD;
+    while (decided < limit) decide(decided++);
+  };
+
+  const sample = (mediaTime: number) => {
+    if (mediaTime - prevT < sampleInterval) return;
+    let gray: Uint8Array;
+    try {
+      ctx.drawImage(video, 0, 0, W, H);
+      const px = ctx.getImageData(0, 0, W, H).data;
+      gray = new Uint8Array(W * H);
+      for (let i = 0, p = 0; i < px.length; i += 4, p++) {
+        gray[p] = (px[i] * 3 + px[i + 1] * 4 + px[i + 2]) >> 3;
+      }
+    } catch (_) {
+      return; // frame not decodable yet
+    }
+    if (prev) {
+      samples.push({ t: mediaTime, frac: changedBlockFraction(gray, prev, blockDiff) });
+      drainDecisions(false);
+    }
+    prev = gray;
+    prevT = mediaTime;
+  };
+
+  await runPlaybackPass(video, duration, { playbackRate, signal, onProgress }, sample);
+  drainDecisions(true);
 
   return { v: 1, duration, detector: DETECTOR, scenes: buildScenes(boundaries, duration, minSceneLen) };
 }
 
 const LABEL_FRAME_MAX_W = 512;
-
-function waitPlayable(video: HTMLVideoElement, timeoutMs: number, message: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const deadline = Date.now() + timeoutMs;
-    const tick = () => {
-      if (video.error) {
-        return reject(new Error(`video error: ${video.error.message || video.error.code}`));
-      }
-      if (!video.seeking && video.readyState >= 2 && video.videoWidth > 0) return resolve();
-      if (Date.now() > deadline) return reject(new Error(message));
-      window.setTimeout(tick, 200);
-    };
-    tick();
-  });
-}
+const SWEEP_DETECTOR = 'label-sweep-v1';
 
 /**
- * Seeks to each scene's midpoint on the (already loaded) scan video, captures
- * a keyframe, and asks the local labeler for a position tag. Best-effort:
- * frames that fail to seek or classify simply stay untagged.
+ * Labeler-driven detector: samples a frame every `labelInterval` seconds
+ * during the playback pass, classifies each via the local labeler, and turns
+ * runs of identical position labels into scenes. Camera cuts within the same
+ * position merge; position changes inside a single take split — scene
+ * boundaries follow what is happening, not how it was edited.
  */
-async function labelScenes(
+async function runLabelSweep(
   video: HTMLVideoElement,
-  data: SceneData,
+  duration: number,
   opts: SceneDetectOptions
-): Promise<void> {
-  const { signal, onLabelProgress } = opts;
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-  const total = data.scenes.length;
-  let done = 0;
-  let labeled = 0;
-  onLabelProgress?.(done, total);
-  for (const scene of data.scenes) {
-    if (signal?.aborted) break;
-    const mid = (scene.start + scene.end) / 2;
+): Promise<SceneData> {
+  const { labelInterval = 4, minSceneLen = 1.5, playbackRate = 4, signal, onProgress } = opts;
+
+  let prevT = -Infinity;
+  let attempts = 0;
+  const samples: Array<{ t: number; position: string | null; confidence: number | null }> = [];
+  // Serial classification queue: at 4x playback a sample arrives roughly
+  // once per wall-clock second and GPU classification is far faster, so the
+  // queue drains as it fills; playback never waits on it.
+  let chain: Promise<void> = Promise.resolve();
+
+  const capture = (mediaTime: number) => {
+    if (mediaTime - prevT < labelInterval) return;
+    if (!video.videoWidth) return;
+    prevT = mediaTime;
+    // Fresh canvas per capture: encoding happens async in the queue and a
+    // shared canvas would be overwritten by the next sample.
+    const canvas = document.createElement('canvas');
+    const scale = Math.min(1, LABEL_FRAME_MAX_W / video.videoWidth);
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
     try {
-      video.currentTime = mid;
-      await waitPlayable(video, 20000, 'label seek timeout');
-      const scale = Math.min(1, LABEL_FRAME_MAX_W / (video.videoWidth || LABEL_FRAME_MAX_W));
-      canvas.width = Math.round((video.videoWidth || 16) * scale);
-      canvas.height = Math.round((video.videoHeight || 9) * scale);
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    } catch (_) {
+      return;
+    }
+    attempts++;
+    chain = chain.then(async () => {
       const blob = await new Promise<Blob | null>((resolve) =>
         canvas.toBlob(resolve, 'image/jpeg', 0.8)
       );
-      if (blob) {
-        const label = await classifyFrame(blob);
-        if (label?.position) {
-          scene.position = label.position;
-          scene.confidence = label.confidence;
-          labeled++;
-        }
-      }
-    } catch (err) {
-      console.warn('Scene labelling failed at', mid, err);
-    }
-    done++;
-    onLabelProgress?.(done, total);
+      if (!blob) return;
+      const label = await classifyFrame(blob);
+      if (!label) return; // request failed — no vote, not a "none"
+      samples.push({ t: mediaTime, position: label.position, confidence: label.confidence });
+    });
+  };
+
+  await runPlaybackPass(video, duration, { playbackRate, signal, onProgress }, capture);
+  await chain;
+
+  if (attempts > 0 && samples.length === 0) {
+    throw new Error('labeler did not respond during the scan');
   }
-  if (labeled > 0) data.detector = `${data.detector}+labeler`;
+
+  return {
+    v: 1,
+    duration,
+    detector: SWEEP_DETECTOR,
+    scenes: buildLabeledScenes(samples, duration, minSceneLen, labelInterval),
+  };
+}
+
+/**
+ * Turns the label sample sequence into scenes. Hysteresis smoothing: the
+ * label only switches when two consecutive samples agree on the new label,
+ * so a single misclassified frame never splits a scene.
+ */
+function buildLabeledScenes(
+  samples: Array<{ t: number; position: string | null; confidence: number | null }>,
+  duration: number,
+  minSceneLen: number,
+  labelInterval: number
+): Scene[] {
+  const wholeVideo: Scene = {
+    i: 0,
+    start: 0,
+    end: round2(duration),
+    position: null,
+    confidence: null,
+  };
+  if (samples.length === 0) return [wholeVideo];
+
+  interface Run {
+    label: string;
+    start: number;
+    confs: number[];
+  }
+  const runs: Run[] = [];
+  let cur: Run | null = null;
+  let pending: { label: string; t: number; conf: number | null } | null = null;
+
+  for (const s of samples) {
+    const label = s.position ?? 'none';
+    if (!cur) {
+      cur = { label, start: 0, confs: s.confidence != null ? [s.confidence] : [] };
+      runs.push(cur);
+      continue;
+    }
+    if (label === cur.label) {
+      if (s.confidence != null) cur.confs.push(s.confidence);
+      pending = null;
+      continue;
+    }
+    if (pending && pending.label === label) {
+      // Two consecutive samples agree on a new label: switch, placing the
+      // boundary just before the first sample of the pair (the transition
+      // happened somewhere in the preceding interval).
+      const start = Math.max(cur.start, round2(pending.t - labelInterval / 2));
+      cur = { label, start, confs: [] };
+      if (pending.conf != null) cur.confs.push(pending.conf);
+      if (s.confidence != null) cur.confs.push(s.confidence);
+      runs.push(cur);
+      pending = null;
+    } else {
+      pending = { label, t: s.t, conf: s.confidence };
+    }
+  }
+
+  const scenes: Scene[] = [];
+  for (let k = 0; k < runs.length; k++) {
+    const start = runs[k].start;
+    const end = k + 1 < runs.length ? runs[k + 1].start : duration;
+    if (end - start <= 0) continue;
+    const confs = runs[k].confs;
+    scenes.push({
+      i: scenes.length,
+      start: round2(start),
+      end: round2(end),
+      position: runs[k].label === 'none' ? null : runs[k].label,
+      confidence: confs.length
+        ? round2(confs.reduce((a, b) => a + b, 0) / confs.length)
+        : null,
+    });
+  }
+  // Fold a too-short tail into the previous scene.
+  if (scenes.length >= 2) {
+    const tail = scenes[scenes.length - 1];
+    if (tail.end - tail.start < minSceneLen) {
+      scenes[scenes.length - 2].end = tail.end;
+      scenes.pop();
+    }
+  }
+  return scenes.length ? scenes : [wholeVideo];
+}
+
+function detectWith(
+  video: HTMLVideoElement,
+  duration: number,
+  opts: SceneDetectOptions
+): Promise<SceneData> {
+  return opts.withLabels ? runLabelSweep(video, duration, opts) : runDetection(video, duration, opts);
 }
 
 /** Scans a local file (e.g. one that is currently uploading) — no network. */
@@ -412,9 +526,7 @@ export async function detectScenesFromFile(
     await waitMetadata(video);
     const duration = video.duration;
     if (!isFinite(duration) || duration <= 0) throw new Error('invalid duration');
-    const data = await runDetection(video, duration, opts);
-    if (opts.withLabels) await labelScenes(video, data, opts);
-    return data;
+    return await detectWith(video, duration, opts);
   } finally {
     teardownVideo(video);
     URL.revokeObjectURL(url);
@@ -437,9 +549,7 @@ export async function detectScenesFromNode(
         await waitMetadata(video);
         const duration = handle.duration || video.duration;
         if (!isFinite(duration) || duration <= 0) throw new Error('invalid duration');
-        const data = await runDetection(video, duration, opts);
-        if (opts.withLabels) await labelScenes(video, data, opts);
-        return data;
+        return await detectWith(video, duration, opts);
       } finally {
         if (handle) {
           handle.destroy();
@@ -458,9 +568,7 @@ export async function detectScenesFromNode(
       await waitMetadata(video);
       const duration = video.duration;
       if (!isFinite(duration) || duration <= 0) throw new Error('invalid duration');
-      const data = await runDetection(video, duration, opts);
-      if (opts.withLabels) await labelScenes(video, data, opts);
-      return data;
+      return await detectWith(video, duration, opts);
     } finally {
       teardownVideo(video);
       cleanup();

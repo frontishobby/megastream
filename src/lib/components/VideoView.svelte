@@ -58,7 +58,6 @@
   let scenes = $state<SceneData | null>(null);
   let scenesLoading = $state(true);
   let detecting = $state<{ processed: number; duration: number } | null>(null);
-  let labelProg = $state<{ done: number; total: number } | null>(null);
   let currentTime = $state(0);
 
   $effect(() => {
@@ -118,7 +117,6 @@
     const mode = await resolveSceneAnalysisMode();
     if (mode === 'skip') return;
     detecting = { processed: 0, duration: 0 };
-    labelProg = null;
     // The scan streams the same file; pause the player so the two transfers
     // don't compete for MEGA's parallel-connection limit (which kills the
     // player's stream with a demuxer read error).
@@ -133,9 +131,6 @@
         onProgress: (processed, dur) => {
           detecting = { processed, duration: dur };
         },
-        onLabelProgress: (done, total) => {
-          labelProg = { done, total };
-        },
       });
       const storage = (node.node as unknown as { storage?: Storage }).storage;
       if (storage) await saveScenes(storage, node.id, data);
@@ -146,7 +141,6 @@
       );
     } finally {
       detecting = null;
-      labelProg = null;
       if (wasPlaying) player?.play().catch(() => {});
     }
   }
@@ -453,7 +447,7 @@
         >
           {#if detecting}
             <Loader2 size={12} class="animate-spin" />
-            <span>{labelProg ? `${labelProg.done}/${labelProg.total}` : `${detectPct}%`}</span>
+            <span>{detectPct}%</span>
           {:else}
             <RefreshCw size={12} />
           {/if}
@@ -470,9 +464,7 @@
       >
         {#if detecting}
           <Loader2 size={14} class="animate-spin" />
-          <span>
-            {labelProg ? `Labeling ${labelProg.done}/${labelProg.total}` : `Scanning… ${detectPct}%`}
-          </span>
+          <span>Scanning… {detectPct}%</span>
         {:else}
           <Film size={14} />
           <span>Detect scenes</span>
