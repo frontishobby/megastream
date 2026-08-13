@@ -39,10 +39,10 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(new Response('Unknown session', { status: 404 }));
     return;
   }
-  event.respondWith(handleStreamRequest(event.request, sessionId, session));
+  event.respondWith(handleStreamRequest(event.request, sessionId, session, url));
 });
 
-async function handleStreamRequest(request, sessionId, session) {
+async function handleStreamRequest(request, sessionId, session, url) {
   const { size, mimeType, clientId } = session;
   const rangeHeader = request.headers.get('range');
 
@@ -54,6 +54,17 @@ async function handleStreamRequest(request, sessionId, session) {
     'Accept-Ranges': 'bytes',
     'Cache-Control': 'no-store',
   });
+
+  // ?download=1 turns a navigation to this URL into a file save: the
+  // attachment disposition hands the response to the download manager
+  // without leaving the page (StreamSaver-style).
+  if (url && url.searchParams.get('download') === '1') {
+    const name = url.searchParams.get('name') || 'download';
+    headers.set(
+      'Content-Disposition',
+      `attachment; filename*=UTF-8''${encodeURIComponent(name)}`
+    );
+  }
 
   if (rangeHeader) {
     const match = /bytes=(\d+)-(\d*)/.exec(rangeHeader);

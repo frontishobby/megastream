@@ -359,12 +359,16 @@
       // and there's no reliable completion signal. Fewer connections than the
       // player so the two transfers don't trip MEGA's parallel limit.
       const { url } = await createStreamUrl(node.node, { maxConnections: 2 });
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = title;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+      // <a download> clicks are requested by the browser's download manager,
+      // which bypasses the service worker and 404s against the real server.
+      // Navigating a hidden iframe *is* intercepted; the SW answers with
+      // Content-Disposition: attachment, which triggers the save. The iframe
+      // stays attached — removing it can abort the request before the
+      // download manager takes over.
+      const iframe = document.createElement('iframe');
+      iframe.hidden = true;
+      iframe.src = `${url}?download=1&name=${encodeURIComponent(title)}`;
+      document.body.appendChild(iframe);
     } catch (err) {
       showToast(
         `Download failed: ${err instanceof Error ? err.message : String(err)}`
