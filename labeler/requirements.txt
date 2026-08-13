@@ -1,6 +1,8 @@
 fastapi
 uvicorn[standard]
-onnxruntime-gpu
+# [cuda,cudnn] pulls the NVIDIA CUDA 12 / cuDNN 9 DLLs as pip wheels so no
+# system CUDA Toolkit install is needed (see preload_dlls in server.py).
+onnxruntime-gpu[cuda,cudnn]
 pillow
 numpy
 huggingface_hub

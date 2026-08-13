@@ -81,6 +81,15 @@ POSITION_TAGS = {
     "fingering": "solo",
 }
 
+# Load CUDA/cuDNN DLLs from the pip-installed NVIDIA wheels; without this,
+# onnxruntime looks for a system CUDA Toolkit (cublasLt64_12.dll etc.) and
+# silently falls back to CPU when it's not installed.
+if hasattr(ort, "preload_dlls"):
+    try:
+        ort.preload_dlls()
+    except Exception as err:  # noqa: BLE001 - CPU fallback still works
+        print("CUDA DLL preload failed (falling back to CPU):", err)
+
 print(f"Loading tagger {WD_REPO} ...")
 _model_path = hf_hub_download(WD_REPO, "model.onnx")
 _csv_path = hf_hub_download(WD_REPO, "selected_tags.csv")
@@ -97,6 +106,8 @@ print(
     f"Ready: {len(_tag_names)} tags, input {_input_size}px, "
     f"providers {_session.get_providers()}, vlm {VLM_MODEL or 'off'}"
 )
+if "CUDAExecutionProvider" not in _session.get_providers():
+    print("WARNING: running on CPU — classification will be slow.")
 
 app = FastAPI()
 app.add_middleware(
