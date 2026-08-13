@@ -14,6 +14,7 @@
     type SceneData,
   } from '../scenes';
   import { resolveSceneAnalysisMode } from '../labeler';
+  import PositionIcon from './PositionIcon.svelte';
   import type { Storage, MutableFile } from 'megajs';
   import { showToast } from '../toast.svelte';
 
@@ -454,7 +455,7 @@
             scene.i
               ? 'bg-red-600 text-white'
               : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}"
-            title={`Scene ${scene.i + 1}: ${formatDuration(scene.start)} – ${formatDuration(scene.end)}`}
+            title={`Scene ${scene.i + 1}: ${formatDuration(scene.start)} – ${formatDuration(scene.end)}${scene.position ? ` · ${scene.position}${scene.alt ? ` + ${scene.alt}` : ''}` : ''}`}
           >
             <span class={activeSceneIndex === scene.i ? 'text-red-200' : 'text-gray-500'}>
               #{scene.i + 1}
@@ -462,11 +463,16 @@
             <span>{formatDuration(scene.start)}</span>
             {#if scene.position}
               <span
-                class="uppercase tracking-wide text-[10px] {activeSceneIndex === scene.i
-                  ? 'text-red-100/90'
+                class="inline-flex items-center gap-0.5 {activeSceneIndex === scene.i
+                  ? 'text-red-100'
                   : 'text-amber-300/90'}"
               >
-                {scene.position}{scene.alt ? `+${scene.alt}` : ''}
+                <PositionIcon position={scene.position} size={16} />
+                {#if scene.alt}
+                  <span class="opacity-60">
+                    <PositionIcon position={scene.alt} size={13} />
+                  </span>
+                {/if}
               </span>
             {/if}
           </button>
