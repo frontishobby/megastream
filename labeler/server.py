@@ -80,7 +80,8 @@ POSITION_TAGS = {
     "paizuri": "paizuri",
     "handjob": "handjob",
     "masturbation": "solo",
-    "fingering": "solo",
+    # NB: "fingering" deliberately unmapped — partner fingering is not solo,
+    # and it has no clean position label of its own.
 }
 
 # Make the pip-installed NVIDIA wheels' DLLs findable; without this,

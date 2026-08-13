@@ -466,7 +466,7 @@
                   ? 'text-red-100/90'
                   : 'text-amber-300/90'}"
               >
-                {scene.position}
+                {scene.position}{scene.alt ? `+${scene.alt}` : ''}
               </span>
             {/if}
           </button>

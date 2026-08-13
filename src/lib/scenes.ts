@@ -11,6 +11,11 @@ export interface Scene {
   // Filled in later by the (offline) position-labelling pass; null until then.
   position: string | null;
   confidence: number | null;
+  /**
+   * Runner-up label when the scene is genuinely mixed (group scenes with
+   * simultaneous acts) — the primary label held less than ~55% of the vote.
+   */
+  alt?: string;
 }
 
 export interface VideoTag {
@@ -369,7 +374,15 @@ async function runDetection(
 }
 
 const LABEL_FRAME_MAX_W = 512;
-const SWEEP_DETECTOR = 'label-sweep-v2';
+const SWEEP_DETECTOR = 'label-sweep-v3';
+// Vote weight of a "none" sample: low enough that close-up/ambiguous blips
+// get absorbed by surrounding labels, high enough that genuinely idle
+// stretches still win.
+const NONE_WEIGHT = 0.3;
+// A scene is "mixed" when its primary label holds under this share…
+const ALT_SHARE_CEILING = 0.55;
+// …and the runner-up holds at least this much.
+const ALT_MIN_SHARE = 0.2;
 
 // Tags that appear on virtually every frame in this domain (or duplicate the
 // position labels) carry no information about a specific video — drop them
@@ -645,11 +658,9 @@ function buildLabeledScenes(
   };
   if (samples.length === 0) return [wholeVideo];
 
-  // 1) Majority smoothing. "none" samples carry no confidence; give them a
-  // modest fixed weight so sparse none-blips lose to surrounding labels but
-  // genuinely unlabelled stretches still win.
+  // 1) Majority smoothing over confidence-weighted votes.
   const half = Math.max(1, Math.floor(smoothWindow / 2));
-  const weightOf = (s: { confidence: number | null }) => s.confidence ?? 0.4;
+  const weightOf = (s: { confidence: number | null }) => s.confidence ?? NONE_WEIGHT;
   const smoothed: string[] = samples.map((_, i) => {
     const votes = new Map<string, number>();
     for (let k = Math.max(0, i - half); k <= Math.min(samples.length - 1, i + half); k++) {
@@ -729,15 +740,45 @@ function buildLabeledScenes(
     changed = true;
   }
 
-  const scenes: Scene[] = segments.map((seg, i) => ({
-    i,
-    start: round2(seg.start),
-    end: round2(seg.end),
-    position: seg.label === 'none' ? null : seg.label,
-    confidence: seg.confs.length
-      ? round2(seg.confs.reduce((a, b) => a + b, 0) / seg.confs.length)
-      : null,
-  }));
+  const scenes: Scene[] = segments.map((seg, i) => {
+    const scene: Scene = {
+      i,
+      start: round2(seg.start),
+      end: round2(seg.end),
+      position: seg.label === 'none' ? null : seg.label,
+      confidence: seg.confs.length
+        ? round2(seg.confs.reduce((a, b) => a + b, 0) / seg.confs.length)
+        : null,
+    };
+    // Mixed-scene detection: group scenes run several acts at once and the
+    // per-frame label follows the camera. When the raw votes inside the
+    // final range are split, surface the runner-up too.
+    if (scene.position) {
+      const votes = new Map<string, number>();
+      let total = 0;
+      for (const s of samples) {
+        if (s.t < seg.start || s.t >= seg.end) continue;
+        const label = s.position ?? 'none';
+        const w = weightOf(s);
+        votes.set(label, (votes.get(label) ?? 0) + w);
+        total += w;
+      }
+      const primaryShare = total > 0 ? (votes.get(seg.label) ?? 0) / total : 1;
+      if (primaryShare < ALT_SHARE_CEILING) {
+        let altLabel: string | null = null;
+        let altW = 0;
+        for (const [label, w] of votes) {
+          if (label === seg.label || label === 'none') continue;
+          if (w > altW) {
+            altW = w;
+            altLabel = label;
+          }
+        }
+        if (altLabel && total > 0 && altW / total >= ALT_MIN_SHARE) scene.alt = altLabel;
+      }
+    }
+    return scene;
+  });
   return scenes.length ? scenes : [wholeVideo];
 }
 
