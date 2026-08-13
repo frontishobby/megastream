@@ -777,9 +777,11 @@ export async function getStoredScenes(
 export async function saveScenes(storage: Storage, videoId: string, data: SceneData): Promise<void> {
   const folder = await ensureThumbFolder(storage);
   // Re-detection would otherwise pile up duplicate names — MEGA allows them.
+  // Scene strips are derived from this data, so drop them too; the next
+  // strip generation rebuilds them from the fresh scenes.
   const name = scenesFileName(videoId);
   const stale = ((folder.children || []) as MutableFile[]).filter(
-    (c) => !c.directory && c.name === name
+    (c) => !c.directory && (c.name === name || (c.name || '').startsWith(`${videoId}.strip-`))
   );
   for (const f of stale) {
     try {

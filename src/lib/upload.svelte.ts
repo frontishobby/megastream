@@ -1,6 +1,7 @@
 import type { MutableFile, Storage } from 'megajs';
 import { MegaService } from './mega';
 import { detectScenesFromFile, saveScenes, type SceneData } from './scenes';
+import { generateStripFromFile, saveStrip } from './strips';
 import type { SceneAnalysisMode } from './labeler';
 
 export type UploadStatus = 'queued' | 'uploading' | 'analyzing' | 'done' | 'error' | 'cancelled';
@@ -188,6 +189,14 @@ async function run(
             await saveScenes(storage, videoId, scenes);
           } catch (err) {
             console.warn('Failed to save scene data for', file.name, err);
+          }
+          // Animated thumbnail strip from the local file while we still
+          // have it — a handful of local seeks, then one small upload.
+          try {
+            const cap = await generateStripFromFile(file, scenes);
+            if (cap) await saveStrip(storage, videoId, cap);
+          } catch (err) {
+            console.warn('Strip generation failed for', file.name, err);
           }
         }
       } else {

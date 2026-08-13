@@ -17,6 +17,7 @@
   import UploadPanel from './lib/components/UploadPanel.svelte';
   import ToastHost from './lib/components/ToastHost.svelte';
   import { generateThumbnails } from './lib/thumbnails';
+  import { generateStrips } from './lib/strips';
   import { generateScenes } from './lib/scenes';
   import { resolveSceneAnalysisMode } from './lib/labeler';
   import { Loader2, AlertCircle, Upload, FolderPlus, Folder, ImagePlus, Film } from '@lucide/svelte';
@@ -185,8 +186,12 @@
       const result = await generateThumbnails(storage, targets, (p) => {
         thumbGen = { done: p.done, total: p.total };
       });
-      if (result.failed > 0) {
-        error = `Failed to generate ${result.failed} of ${targets.length} thumbnails (unsupported codec or timeout)`;
+      // Second pass: animated scene strips for videos that have scene data.
+      const stripResult = await generateStrips(storage, targets, (p) => {
+        thumbGen = { done: p.done, total: p.total };
+      });
+      if (result.failed > 0 || stripResult.failed > 0) {
+        error = `Failed to generate ${result.failed + stripResult.failed} of ${targets.length} thumbnails (unsupported codec or timeout)`;
       }
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);

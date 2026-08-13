@@ -31,7 +31,7 @@ function openDb(): Promise<IDBDatabase> {
   return dbPromise;
 }
 
-async function getCached(key: string): Promise<string | null> {
+export async function getCached(key: string): Promise<string | null> {
   try {
     const db = await openDb();
     return await new Promise<string | null>((resolve, reject) => {
@@ -45,7 +45,7 @@ async function getCached(key: string): Promise<string | null> {
   }
 }
 
-async function setCached(key: string, value: string): Promise<void> {
+export async function setCached(key: string, value: string): Promise<void> {
   try {
     const db = await openDb();
     await new Promise<void>((resolve, reject) => {
@@ -236,7 +236,7 @@ async function captureFrame(node: MegaFileLike): Promise<CapturedFrame> {
   }
 }
 
-function blobToDataUrl(blob: Blob): Promise<string> {
+export function blobToDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result as string);
@@ -245,7 +245,7 @@ function blobToDataUrl(blob: Blob): Promise<string> {
   });
 }
 
-function dataUrlToBytes(dataUrl: string): Uint8Array {
+export function dataUrlToBytes(dataUrl: string): Uint8Array {
   const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
   const bin = atob(base64);
   const out = new Uint8Array(bin.length);

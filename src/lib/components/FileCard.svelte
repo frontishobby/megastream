@@ -4,6 +4,7 @@
   import type { MegaNode } from '../mega';
   import { MegaService } from '../mega';
   import { getStoredThumbnail, thumbnailEvents } from '../thumbnails';
+  import { getStoredStrip, type StripData } from '../strips';
 
   let { node, onSelect, onDeleted } = $props<{
     node: MegaNode;
@@ -16,6 +17,47 @@
   let cardEl: HTMLDivElement | undefined = $state();
   let thumbnail = $state<string | null>(null);
   let thumbnailLoading = $state(false);
+
+  // Animated scene strip: middle frame at rest, cycling while hovered (or a
+  // touch is held on mobile).
+  let strip = $state<StripData | null>(null);
+  let frameIdx = $state(0);
+  let cycleTimer: number | null = null;
+  let touchStartedAt = 0;
+
+  const midFrame = (s: StripData) => Math.floor(s.frames / 2);
+
+  function startCycle() {
+    if (!strip || strip.frames <= 1 || cycleTimer != null) return;
+    cycleTimer = window.setInterval(() => {
+      if (strip) frameIdx = (frameIdx + 1) % strip.frames;
+    }, 1000);
+  }
+
+  function stopCycle() {
+    if (cycleTimer != null) {
+      clearInterval(cycleTimer);
+      cycleTimer = null;
+    }
+    if (strip) frameIdx = midFrame(strip);
+  }
+
+  function handleTouchStart() {
+    touchStartedAt = Date.now();
+    startCycle();
+  }
+
+  function handleTouchEnd(e: TouchEvent) {
+    stopCycle();
+    // A held touch was a preview, not a tap — swallow the synthetic click.
+    if (Date.now() - touchStartedAt > 350) e.preventDefault();
+  }
+
+  $effect(() => {
+    return () => {
+      if (cycleTimer != null) clearInterval(cycleTimer);
+    };
+  });
 
   let memo = $state<string | undefined>(untrack(() => node.memo));
   let editing = $state(false);
@@ -187,10 +229,17 @@
 
     const load = () => {
       thumbnailLoading = true;
-      getStoredThumbnail(node.id, node.node)
-        .then((url) => {
-          if (cancelled || !url) return;
-          thumbnail = url;
+      Promise.all([
+        getStoredStrip(node.id, node.node),
+        getStoredThumbnail(node.id, node.node),
+      ])
+        .then(([s, url]) => {
+          if (cancelled) return;
+          if (s) {
+            strip = s;
+            frameIdx = midFrame(s);
+          }
+          if (url) thumbnail = url;
         })
         .finally(() => {
           if (!cancelled) thumbnailLoading = false;
@@ -232,8 +281,34 @@
   onclick={handleCardClick}
   onkeydown={handleCardKey}
 >
-  <div class="aspect-video bg-gray-900 relative overflow-hidden" data-card-surface>
-    {#if thumbnail}
+  <!-- Hover/touch preview only; activation stays on the card root. -->
+  <div
+    class="aspect-video bg-gray-900 relative overflow-hidden"
+    data-card-surface
+    role="presentation"
+    onmouseenter={startCycle}
+    onmouseleave={stopCycle}
+    ontouchstart={handleTouchStart}
+    ontouchend={handleTouchEnd}
+    ontouchcancel={handleTouchEnd}
+  >
+    {#if strip}
+      <div
+        class="w-full h-full select-none"
+        data-card-surface
+        style="background-image: url({strip.url}); background-size: {strip.frames *
+          100}% 100%; background-position: {strip.frames > 1
+          ? (frameIdx / (strip.frames - 1)) * 100
+          : 0}% 0; background-repeat: no-repeat; -webkit-touch-callout: none;"
+      ></div>
+      <div
+        class="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
+      >
+        <div class="bg-red-600/90 rounded-full p-3">
+          <Play class="text-white fill-current" size={24} />
+        </div>
+      </div>
+    {:else if thumbnail}
       <img
         src={thumbnail}
         alt=""
