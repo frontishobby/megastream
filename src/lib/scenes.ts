@@ -435,6 +435,98 @@ async function runLabelSweep(
   };
 }
 
+function waitSeekComplete(video: HTMLVideoElement, timeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    const check = () => {
+      if (video.error) {
+        return reject(new Error(`video error: ${video.error.message || video.error.code}`));
+      }
+      if (!video.seeking && video.readyState >= 2 && video.videoWidth > 0) return resolve();
+      if (Date.now() > deadline) return reject(new Error('seek timeout'));
+      window.setTimeout(check, 40);
+    };
+    check();
+  });
+}
+
+/**
+ * Seek-stepping variant of the label sweep for local files: instead of
+ * playing the video through in real time, jump straight to each sample
+ * point and capture it. Local random access makes a seek cost ~100ms of
+ * decode, so a 30-minute file scans in about a minute instead of the 7.5
+ * minutes a 4x playback pass takes — and the GPU stays busy because
+ * classification runs while the next seek is decoding. Remote streams keep
+ * the playback pass: there each seek would trigger fresh range downloads.
+ */
+async function runLabelSweepSeek(
+  video: HTMLVideoElement,
+  duration: number,
+  opts: SceneDetectOptions
+): Promise<SceneData> {
+  const { labelInterval = 4, minSceneLen = 30, smoothWindow = 7, signal, onProgress } = opts;
+
+  const samples: Array<{ t: number; position: string | null; confidence: number | null }> = [];
+  const tasks: Promise<void>[] = [];
+  let attempts = 0;
+
+  // Sample mid-interval (2s, 6s, …) so the first point is a real seek and
+  // each frame represents its surrounding interval.
+  for (let t = labelInterval / 2; t < duration - 0.25; t += labelInterval) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    try {
+      video.currentTime = t;
+      await waitSeekComplete(video, 15000);
+    } catch (err) {
+      if (video.error) throw err instanceof Error ? err : new Error(String(err));
+      console.warn('Label seek failed at', t, err);
+      continue;
+    }
+    // Fresh canvas per capture: encoding + classification run async while
+    // the loop seeks on.
+    const canvas = document.createElement('canvas');
+    const scale = Math.min(1, LABEL_FRAME_MAX_W / video.videoWidth);
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) continue;
+    try {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    } catch (_) {
+      continue;
+    }
+    attempts++;
+    const at = t;
+    tasks.push(
+      (async () => {
+        const blob = await new Promise<Blob | null>((resolve) =>
+          canvas.toBlob(resolve, 'image/jpeg', 0.8)
+        );
+        if (!blob) return;
+        const label = await classifyFrame(blob);
+        if (!label) return; // request failed — no vote, not a "none"
+        samples.push({ t: at, position: label.position, confidence: label.confidence });
+      })()
+    );
+    onProgress?.(Math.min(t, duration), duration);
+  }
+
+  await Promise.all(tasks);
+
+  if (attempts > 0 && samples.length === 0) {
+    throw new Error('labeler did not respond during the scan');
+  }
+  // Classification finishes out of order; the run builder needs time order.
+  samples.sort((a, b) => a.t - b.t);
+
+  return {
+    v: 1,
+    duration,
+    detector: SWEEP_DETECTOR,
+    scenes: buildLabeledScenes(samples, duration, minSceneLen, labelInterval, smoothWindow),
+  };
+}
+
 /**
  * Turns the label sample sequence into scenes in three steps:
  *
@@ -579,7 +671,11 @@ export async function detectScenesFromFile(
     await waitMetadata(video);
     const duration = video.duration;
     if (!isFinite(duration) || duration <= 0) throw new Error('invalid duration');
-    return await detectWith(video, duration, opts);
+    // Local files have free random access — seek-step instead of playing
+    // the whole file through.
+    return opts.withLabels
+      ? await runLabelSweepSeek(video, duration, opts)
+      : await runDetection(video, duration, opts);
   } finally {
     teardownVideo(video);
     URL.revokeObjectURL(url);
