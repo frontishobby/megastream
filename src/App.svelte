@@ -2,6 +2,7 @@
   import type { Storage, File as MegaFile } from 'megajs';
   import Navbar from './lib/components/Navbar.svelte';
   import FileCard from './lib/components/FileCard.svelte';
+  import FolderTree from './lib/components/FolderTree.svelte';
   import VideoView from './lib/components/VideoView.svelte';
   import LoginScreen from './lib/components/LoginScreen.svelte';
   import { MegaService, type MegaNode } from './lib/mega';
@@ -16,7 +17,8 @@
   import UploadPanel from './lib/components/UploadPanel.svelte';
   import ToastHost from './lib/components/ToastHost.svelte';
   import { generateThumbnails } from './lib/thumbnails';
-  import { Loader2, AlertCircle, Upload, FolderPlus, ImagePlus } from '@lucide/svelte';
+  import { Loader2, AlertCircle, Upload, FolderPlus, Folder, ImagePlus } from '@lucide/svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import './app.css';
 
   interface Quota {
@@ -88,6 +90,43 @@
       name: i === 0 ? 'Root' : f.name || 'Folder',
     }))
   );
+
+  // Folder tree sidebar state. `null` id means Root/home is selected.
+  const rootFolder = $derived(
+    storage ? ((storage.root as unknown as MegaFile) ?? null) : null
+  );
+
+  const currentFolderId = $derived.by<string | null>(() => {
+    const f = currentFolder;
+    if (!f || !rootFolder) return null;
+    if (f === rootFolder) return null;
+    return (f as unknown as { nodeId?: string }).nodeId ?? null;
+  });
+
+  const expandedFolders = new SvelteSet<string>();
+
+  // Keep the tree opened down to whatever folder the route points at, so
+  // deep-linking or playing a nested video still reveals the current location.
+  $effect(() => {
+    for (const f of pathFolders) {
+      const id = (f as unknown as { nodeId?: string }).nodeId;
+      if (id) expandedFolders.add(id);
+    }
+  });
+
+  // Subfolders of the open folder — used for the compact strip shown where the
+  // sidebar is hidden (narrow screens).
+  const folderNodes = $derived(nodes.filter((n) => n.type === 'folder'));
+  const fileNodes = $derived(nodes.filter((n) => n.type === 'file'));
+
+  function handleFolderSelect(node: MegaFile, isRoot: boolean) {
+    if (isRoot) {
+      navigate({ kind: 'home' });
+      return;
+    }
+    const id = (node as unknown as { nodeId?: string }).nodeId;
+    if (id) navigate({ kind: 'folder', id });
+  }
 
   $effect(() => {
     if (!restoring) return;
@@ -331,59 +370,108 @@
         <p class="text-sm">Loading file…</p>
       </main>
     {:else}
-      <main class="flex-1 container mx-auto p-4 md:p-8">
-        {#if error}
-          <div class="bg-red-900/20 border border-red-900/50 text-red-400 p-4 rounded-lg flex items-center gap-3 mb-8">
-            <AlertCircle size={20} />
-            <p>{error}</p>
+      <div class="flex-1 container mx-auto w-full flex items-stretch">
+        <aside class="hidden md:flex flex-col w-64 shrink-0 border-r border-gray-900 bg-gray-950/40">
+          <div class="px-4 pt-5 pb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">
+            Folders
           </div>
-        {/if}
-
-        <div class="flex justify-end mb-4 gap-2">
-          <button
-            type="button"
-            onclick={handleGenerateThumbnails}
-            disabled={!currentFolder || !!thumbGen || videoNodes.length === 0}
-            class="inline-flex items-center gap-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 text-sm font-medium px-4 py-2 rounded-full transition-colors"
+          <div
+            class="flex-1 overflow-y-auto px-2 pb-4 sticky top-[76px] max-h-[calc(100vh-76px)]"
+            role="tree"
+            aria-label="Folder tree"
           >
-            {#if thumbGen}
-              <Loader2 size={16} class="animate-spin" />
-              <span>Thumbnails {thumbGen.done}/{thumbGen.total}</span>
-            {:else}
-              <ImagePlus size={16} />
-              <span>Generate thumbnails</span>
+            {#if rootFolder}
+              <FolderTree
+                node={rootFolder}
+                isRoot
+                currentId={currentFolderId}
+                expanded={expandedFolders}
+                onSelect={handleFolderSelect}
+              />
             {/if}
-          </button>
-          <button
-            type="button"
-            onclick={handleCreateFolder}
-            disabled={!currentFolder || creatingFolder}
-            class="inline-flex items-center gap-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 text-sm font-medium px-4 py-2 rounded-full transition-colors"
-          >
-            <FolderPlus size={16} />
-            <span>New folder</span>
-          </button>
-          <button
-            type="button"
-            onclick={handleUploadClick}
-            disabled={!currentFolder}
-            class="inline-flex items-center gap-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium px-4 py-2 rounded-full transition-colors"
-          >
-            <Upload size={16} />
-            <span>Upload</span>
-          </button>
-        </div>
-
-        {#if nodes.length > 0}
-          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {#each nodes as node (node.id)}
-              <FileCard {node} onSelect={handleSelect} onDeleted={handleDeleted} />
-            {/each}
           </div>
-        {:else}
-          <div class="text-center py-20 text-gray-500">This folder is empty.</div>
-        {/if}
-      </main>
+        </aside>
+
+        <main class="flex-1 min-w-0 p-4 md:p-8">
+          {#if error}
+            <div class="bg-red-900/20 border border-red-900/50 text-red-400 p-4 rounded-lg flex items-center gap-3 mb-8">
+              <AlertCircle size={20} />
+              <p>{error}</p>
+            </div>
+          {/if}
+
+          <div class="flex justify-end mb-4 gap-2">
+            <button
+              type="button"
+              onclick={handleGenerateThumbnails}
+              disabled={!currentFolder || !!thumbGen || videoNodes.length === 0}
+              class="inline-flex items-center gap-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 text-sm font-medium px-4 py-2 rounded-full transition-colors"
+            >
+              {#if thumbGen}
+                <Loader2 size={16} class="animate-spin" />
+                <span>Thumbnails {thumbGen.done}/{thumbGen.total}</span>
+              {:else}
+                <ImagePlus size={16} />
+                <span>Generate thumbnails</span>
+              {/if}
+            </button>
+            <button
+              type="button"
+              onclick={handleCreateFolder}
+              disabled={!currentFolder || creatingFolder}
+              class="inline-flex items-center gap-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 text-sm font-medium px-4 py-2 rounded-full transition-colors"
+            >
+              <FolderPlus size={16} />
+              <span>New folder</span>
+            </button>
+            <button
+              type="button"
+              onclick={handleUploadClick}
+              disabled={!currentFolder}
+              class="inline-flex items-center gap-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium px-4 py-2 rounded-full transition-colors"
+            >
+              <Upload size={16} />
+              <span>Upload</span>
+            </button>
+          </div>
+
+          <!-- Subfolder shortcuts for the current folder; on narrow screens this
+               is also the primary folder navigation since the sidebar is hidden. -->
+          {#if folderNodes.length > 0}
+            <div class="mb-5">
+              <div class="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2">
+                Subfolders
+              </div>
+              <div class="flex flex-wrap gap-2">
+                {#each folderNodes as folder (folder.id)}
+                  <button
+                    type="button"
+                    onclick={() => handleSelect(folder)}
+                    class="inline-flex items-center gap-1.5 bg-gray-800 hover:bg-gray-700 text-gray-200 text-sm px-3 py-1.5 rounded-full transition-colors max-w-full"
+                  >
+                    <Folder size={14} class="text-blue-400 shrink-0" />
+                    <span class="truncate">{folder.name}</span>
+                  </button>
+                {/each}
+              </div>
+            </div>
+          {/if}
+
+          {#if fileNodes.length > 0}
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+              {#each fileNodes as node (node.id)}
+                <FileCard {node} onSelect={handleSelect} onDeleted={handleDeleted} />
+              {/each}
+            </div>
+          {:else if folderNodes.length > 0}
+            <div class="text-center py-20 text-gray-500">
+              No files here — pick a subfolder from the sidebar.
+            </div>
+          {:else}
+            <div class="text-center py-20 text-gray-500">This folder is empty.</div>
+          {/if}
+        </main>
+      </div>
     {/if}
 
     {#if dropTargetActive}
