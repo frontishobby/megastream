@@ -13,11 +13,20 @@ export interface Scene {
   confidence: number | null;
 }
 
+export interface VideoTag {
+  /** booru tag name */
+  t: string;
+  /** score = presence × mean confidence */
+  s: number;
+}
+
 export interface SceneData {
   v: 1;
   duration: number;
   detector: string;
   scenes: Scene[];
+  /** Video-level descriptive tags aggregated across labelled frames. */
+  videoTags?: VideoTag[];
 }
 
 interface MegaFileLike {
@@ -362,6 +371,66 @@ async function runDetection(
 const LABEL_FRAME_MAX_W = 512;
 const SWEEP_DETECTOR = 'label-sweep-v2';
 
+// Tags that appear on virtually every frame in this domain (or duplicate the
+// position labels) carry no information about a specific video — drop them
+// before aggregating. Tune freely.
+const TAG_BLOCKLIST = new Set([
+  // ubiquitous subjects/anatomy
+  '1girl', '1boy', '2girls', '2boys', 'multiple_girls', 'multiple_boys',
+  'solo', 'solo_focus', 'nude', 'completely_nude', 'topless', 'bottomless',
+  'breasts', 'nipples', 'penis', 'pussy', 'anus', 'ass', 'testicles',
+  'erection', 'navel', 'barefoot', 'collarbone', 'thighs',
+  // ubiquitous acts/states
+  'sex', 'vaginal', 'hetero', 'sweat', 'blush', 'open_mouth', 'closed_eyes',
+  'lying', 'spread_legs', 'on_back', 'on_bed', 'bed', 'bed_sheet', 'pillow',
+  'indoors', 'long_hair',
+  // medium/censoring
+  'censored', 'uncensored', 'mosaic_censoring', 'bar_censor',
+  'photorealistic', 'realistic', 'photo_(medium)',
+  // position tags — already expressed as scene labels
+  'missionary', 'doggystyle', 'sex_from_behind', 'bent_over',
+  'cowgirl_position', 'girl_on_top', 'upright_straddle',
+  'reverse_cowgirl_position', 'spooning', 'standing_sex',
+  'suspended_congress', 'fellatio', 'irrumatio', 'deepthroat',
+  'cunnilingus', '69', 'paizuri', 'handjob', 'masturbation', 'fingering',
+  'oral',
+]);
+const TAG_PRESENT_CONF = 0.35;
+const TAG_MIN_PRESENCE = 0.2;
+const MAX_VIDEO_TAGS = 6;
+
+/**
+ * Video-level tags: a tag qualifies when it shows up (conf ≥ 0.35) in at
+ * least 20% of labelled frames — a property of the video, not one moment —
+ * and tags are ranked by presence × mean confidence.
+ */
+function aggregateVideoTags(samples: Array<{ tags?: Record<string, number> }>): VideoTag[] {
+  const tagged = samples.filter((s) => s.tags && Object.keys(s.tags).length > 0);
+  if (tagged.length === 0) return [];
+  const acc = new Map<string, { present: number; confSum: number; count: number }>();
+  for (const s of tagged) {
+    for (const [tag, conf] of Object.entries(s.tags!)) {
+      if (TAG_BLOCKLIST.has(tag)) continue;
+      let e = acc.get(tag);
+      if (!e) {
+        e = { present: 0, confSum: 0, count: 0 };
+        acc.set(tag, e);
+      }
+      if (conf >= TAG_PRESENT_CONF) e.present++;
+      e.confSum += conf;
+      e.count++;
+    }
+  }
+  const out: VideoTag[] = [];
+  for (const [tag, e] of acc) {
+    const presence = e.present / tagged.length;
+    if (presence < TAG_MIN_PRESENCE) continue;
+    out.push({ t: tag, s: round2(presence * (e.confSum / e.count)) });
+  }
+  out.sort((a, b) => b.s - a.s);
+  return out.slice(0, MAX_VIDEO_TAGS);
+}
+
 /**
  * Labeler-driven detector: samples a frame every `labelInterval` seconds
  * during the playback pass, classifies each via the local labeler, and turns
@@ -385,7 +454,12 @@ async function runLabelSweep(
 
   let prevT = -Infinity;
   let attempts = 0;
-  const samples: Array<{ t: number; position: string | null; confidence: number | null }> = [];
+  const samples: Array<{
+    t: number;
+    position: string | null;
+    confidence: number | null;
+    tags?: Record<string, number>;
+  }> = [];
   // Serial classification queue: at 4x playback a sample arrives roughly
   // once per wall-clock second and GPU classification is far faster, so the
   // queue drains as it fills; playback never waits on it.
@@ -416,7 +490,12 @@ async function runLabelSweep(
       if (!blob) return;
       const label = await classifyFrame(blob);
       if (!label) return; // request failed — no vote, not a "none"
-      samples.push({ t: mediaTime, position: label.position, confidence: label.confidence });
+      samples.push({
+        t: mediaTime,
+        position: label.position,
+        confidence: label.confidence,
+        tags: label.tags,
+      });
     });
   };
 
@@ -432,6 +511,7 @@ async function runLabelSweep(
     duration,
     detector: SWEEP_DETECTOR,
     scenes: buildLabeledScenes(samples, duration, minSceneLen, labelInterval, smoothWindow),
+    videoTags: aggregateVideoTags(samples),
   };
 }
 
@@ -466,7 +546,12 @@ async function runLabelSweepSeek(
 ): Promise<SceneData> {
   const { labelInterval = 4, minSceneLen = 30, smoothWindow = 7, signal, onProgress } = opts;
 
-  const samples: Array<{ t: number; position: string | null; confidence: number | null }> = [];
+  const samples: Array<{
+    t: number;
+    position: string | null;
+    confidence: number | null;
+    tags?: Record<string, number>;
+  }> = [];
   const tasks: Promise<void>[] = [];
   let attempts = 0;
 
@@ -505,7 +590,12 @@ async function runLabelSweepSeek(
         if (!blob) return;
         const label = await classifyFrame(blob);
         if (!label) return; // request failed — no vote, not a "none"
-        samples.push({ t: at, position: label.position, confidence: label.confidence });
+        samples.push({
+          t: at,
+          position: label.position,
+          confidence: label.confidence,
+          tags: label.tags,
+        });
       })()
     );
     onProgress?.(Math.min(t, duration), duration);
@@ -524,6 +614,7 @@ async function runLabelSweepSeek(
     duration,
     detector: SWEEP_DETECTOR,
     scenes: buildLabeledScenes(samples, duration, minSceneLen, labelInterval, smoothWindow),
+    videoTags: aggregateVideoTags(samples),
   };
 }
 
@@ -774,7 +865,15 @@ export async function getStoredScenes(
   return task;
 }
 
-export async function saveScenes(storage: Storage, videoId: string, data: SceneData): Promise<void> {
+export async function saveScenes(
+  storage: Storage,
+  videoId: string,
+  data: SceneData,
+  // When the video node is provided, the aggregated tags are mirrored into
+  // its `_tags` attribute (same mechanism as `_memo`) so the folder listing
+  // can show them without fetching any sidecars.
+  videoNode?: MutableFile
+): Promise<void> {
   const folder = await ensureThumbFolder(storage);
   // Re-detection would otherwise pile up duplicate names — MEGA allows them.
   // Scene strips are derived from this data, so drop them too; the next
@@ -793,6 +892,16 @@ export async function saveScenes(storage: Storage, videoId: string, data: SceneD
   const bytes = new TextEncoder().encode(JSON.stringify(data));
   await uploadBytes(folder, scenesFileName(videoId), bytes);
   cache.set(videoId, data);
+  if (videoNode) {
+    const value = data.videoTags?.length
+      ? data.videoTags.map((v) => v.t).join(',')
+      : undefined; // clears stale tags when a rescan produced none
+    try {
+      await videoNode.setAttributes({ _tags: value } as unknown as JSON);
+    } catch (err) {
+      console.warn('Failed to save video tags', err);
+    }
+  }
   sceneEvents.dispatchEvent(new CustomEvent('scenes', { detail: videoId }));
 }
 
@@ -843,7 +952,7 @@ export async function generateScenes(
     }
     try {
       const data = await detectScenesFromNode(video.node, { withLabels });
-      await saveScenes(storage, video.id, data);
+      await saveScenes(storage, video.id, data, video.node as unknown as MutableFile);
       result.generated++;
     } catch (err) {
       console.warn('Scene detection failed for', video.name, err);

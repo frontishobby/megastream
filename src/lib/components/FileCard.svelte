@@ -31,7 +31,7 @@
     if (!strip || strip.frames <= 1 || cycleTimer != null) return;
     cycleTimer = window.setInterval(() => {
       if (strip) frameIdx = (frameIdx + 1) % strip.frames;
-    }, 1000);
+    }, 1500);
   }
 
   function stopCycle() {
@@ -280,18 +280,13 @@
   class="w-full text-left bg-gray-800 rounded-lg overflow-hidden hover:bg-gray-700 transition-colors cursor-pointer group border border-gray-700 flex flex-col focus:outline-none focus:ring-2 focus:ring-red-500"
   onclick={handleCardClick}
   onkeydown={handleCardKey}
+  onmouseenter={startCycle}
+  onmouseleave={stopCycle}
+  ontouchstart={handleTouchStart}
+  ontouchend={handleTouchEnd}
+  ontouchcancel={handleTouchEnd}
 >
-  <!-- Hover/touch preview only; activation stays on the card root. -->
-  <div
-    class="aspect-video bg-gray-900 relative overflow-hidden"
-    data-card-surface
-    role="presentation"
-    onmouseenter={startCycle}
-    onmouseleave={stopCycle}
-    ontouchstart={handleTouchStart}
-    ontouchend={handleTouchEnd}
-    ontouchcancel={handleTouchEnd}
-  >
+  <div class="aspect-video bg-gray-900 relative overflow-hidden" data-card-surface>
     {#if strip}
       <div
         class="w-full h-full select-none"
@@ -301,13 +296,6 @@
           ? (frameIdx / (strip.frames - 1)) * 100
           : 0}% 0; background-repeat: no-repeat; -webkit-touch-callout: none;"
       ></div>
-      <div
-        class="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
-      >
-        <div class="bg-red-600/90 rounded-full p-3">
-          <Play class="text-white fill-current" size={24} />
-        </div>
-      </div>
     {:else if thumbnail}
       <img
         src={thumbnail}
@@ -430,6 +418,16 @@
     <p class="text-gray-400 text-xs mt-1" data-card-surface>
       {node.type === 'folder' ? 'Folder' : formatSize(node.size)}
     </p>
+
+    {#if node.tags?.length}
+      <div class="mt-1.5 flex flex-wrap gap-1" data-card-surface>
+        {#each node.tags.slice(0, 3) as tag (tag)}
+          <span class="bg-gray-700/70 text-gray-300 text-[10px] px-1.5 py-0.5 rounded-full">
+            {tag.replace(/_/g, ' ')}
+          </span>
+        {/each}
+      </div>
+    {/if}
 
     {#if editing}
       <div class="mt-2">

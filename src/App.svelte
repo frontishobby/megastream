@@ -122,6 +122,33 @@
   const folderNodes = $derived(nodes.filter((n) => n.type === 'folder'));
   const fileNodes = $derived(nodes.filter((n) => n.type === 'file'));
 
+  // Tag filter: chips built from the current folder's video tags; selecting
+  // several narrows to videos carrying all of them.
+  const selectedTags = new SvelteSet<string>();
+  const folderTags = $derived.by(() => {
+    const counts = new Map<string, number>();
+    for (const n of fileNodes) {
+      for (const t of n.tags ?? []) counts.set(t, (counts.get(t) ?? 0) + 1);
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([t]) => t);
+  });
+  const visibleFileNodes = $derived(
+    selectedTags.size === 0
+      ? fileNodes
+      : fileNodes.filter((n) => [...selectedTags].every((t) => n.tags?.includes(t)))
+  );
+
+  function toggleTag(tag: string) {
+    if (selectedTags.has(tag)) selectedTags.delete(tag);
+    else selectedTags.add(tag);
+  }
+
+  // Leaving the folder resets the filter — chips are per-folder.
+  $effect(() => {
+    void currentFolder;
+    selectedTags.clear();
+  });
+
   function handleFolderSelect(node: MegaFile, isRoot: boolean) {
     if (isRoot) {
       navigate({ kind: 'home' });
@@ -506,11 +533,43 @@
             </div>
           {/if}
 
-          {#if fileNodes.length > 0}
+          {#if folderTags.length > 0}
+            <div class="mb-4 flex flex-wrap items-center gap-1.5">
+              <span class="text-xs font-semibold uppercase tracking-wider text-gray-500 mr-1">
+                Tags
+              </span>
+              {#each folderTags as tag (tag)}
+                <button
+                  type="button"
+                  onclick={() => toggleTag(tag)}
+                  class="text-xs px-2.5 py-1 rounded-full transition-colors {selectedTags.has(tag)
+                    ? 'bg-red-600 text-white'
+                    : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}"
+                >
+                  {tag.replace(/_/g, ' ')}
+                </button>
+              {/each}
+              {#if selectedTags.size > 0}
+                <button
+                  type="button"
+                  onclick={() => selectedTags.clear()}
+                  class="text-xs text-gray-500 hover:text-gray-200 px-2 py-1"
+                >
+                  Clear
+                </button>
+              {/if}
+            </div>
+          {/if}
+
+          {#if visibleFileNodes.length > 0}
             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-              {#each fileNodes as node (node.id)}
+              {#each visibleFileNodes as node (node.id)}
                 <FileCard {node} onSelect={handleSelect} onDeleted={handleDeleted} />
               {/each}
+            </div>
+          {:else if fileNodes.length > 0}
+            <div class="text-center py-20 text-gray-500">
+              No videos match the selected tags.
             </div>
           {:else if folderNodes.length > 0}
             <div class="text-center py-20 text-gray-500">

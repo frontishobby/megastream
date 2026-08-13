@@ -186,7 +186,7 @@ async function run(
         const videoId = (uploadedNode as unknown as { nodeId?: string } | undefined)?.nodeId;
         if (scenes && storage && videoId) {
           try {
-            await saveScenes(storage, videoId, scenes);
+            await saveScenes(storage, videoId, scenes, uploadedNode);
           } catch (err) {
             console.warn('Failed to save scene data for', file.name, err);
           }

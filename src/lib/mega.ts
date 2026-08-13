@@ -7,6 +7,8 @@ export interface MegaNode {
   type: 'file' | 'folder';
   id: string;
   memo?: string;
+  /** Video-level descriptive tags mirrored from scene analysis (_tags). */
+  tags?: string[];
   node: File;
 }
 
@@ -24,6 +26,14 @@ function readMemo(file: File): string | undefined {
   return typeof m === 'string' && m.length > 0 ? m : undefined;
 }
 
+function readTags(file: File): string[] | undefined {
+  const attrs = (file as any).attributes;
+  const t = attrs?._tags;
+  if (typeof t !== 'string' || t.length === 0) return undefined;
+  const tags = t.split(',').map((x) => x.trim()).filter(Boolean);
+  return tags.length > 0 ? tags : undefined;
+}
+
 export class MegaService {
   static listChildren(folder: File): MegaNode[] {
     const children = (folder.children || []).filter(
@@ -35,6 +45,7 @@ export class MegaService {
       type: child.directory ? 'folder' : 'file',
       id: fileId(child),
       memo: readMemo(child),
+      tags: readTags(child),
       node: child,
     }));
   }

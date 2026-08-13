@@ -14,7 +14,7 @@
     type SceneData,
   } from '../scenes';
   import { resolveSceneAnalysisMode } from '../labeler';
-  import type { Storage } from 'megajs';
+  import type { Storage, MutableFile } from 'megajs';
   import { showToast } from '../toast.svelte';
 
   let { node, onBack } = $props<{
@@ -133,7 +133,9 @@
         },
       });
       const storage = (node.node as unknown as { storage?: Storage }).storage;
-      if (storage) await saveScenes(storage, node.id, data);
+      if (storage) {
+        await saveScenes(storage, node.id, data, node.node as unknown as MutableFile);
+      }
       scenes = data;
     } catch (err) {
       showToast(
@@ -662,6 +664,20 @@
           <dt class="text-gray-500">Node ID</dt>
           <dd class="text-gray-200 text-right font-mono text-xs break-all">{node.id}</dd>
         </div>
+        {#if scenes?.videoTags?.length}
+          <div class="flex justify-between gap-3">
+            <dt class="text-gray-500">Tags</dt>
+            <dd class="text-right">
+              <div class="flex flex-wrap gap-1 justify-end">
+                {#each scenes.videoTags as tag (tag.t)}
+                  <span class="bg-gray-800 text-gray-300 text-[11px] px-2 py-0.5 rounded-full">
+                    {tag.t.replace(/_/g, ' ')}
+                  </span>
+                {/each}
+              </div>
+            </dd>
+          </div>
+        {/if}
       </dl>
     </aside>
   </div>

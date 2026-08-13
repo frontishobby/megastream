@@ -29,6 +29,8 @@ export async function probeLabeler(timeoutMs = 2500): Promise<boolean> {
 export interface FrameLabel {
   position: string | null;
   confidence: number | null;
+  /** General booru tags for the frame, tag -> confidence. */
+  tags: Record<string, number>;
 }
 
 export async function classifyFrame(frame: Blob): Promise<FrameLabel | null> {
@@ -41,9 +43,16 @@ export async function classifyFrame(frame: Blob): Promise<FrameLabel | null> {
     });
     if (!res.ok) return null;
     const data = await res.json();
+    const tags: Record<string, number> = {};
+    if (data.tags && typeof data.tags === 'object') {
+      for (const [tag, conf] of Object.entries(data.tags)) {
+        if (typeof conf === 'number') tags[tag] = conf;
+      }
+    }
     return {
       position: typeof data.position === 'string' ? data.position : null,
       confidence: typeof data.confidence === 'number' ? data.confidence : null,
+      tags,
     };
   } catch (err) {
     console.warn('Frame classification failed', err);
