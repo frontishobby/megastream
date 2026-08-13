@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowLeft, StickyNote, Pencil, Check, X, Loader2, Film, RefreshCw } from '@lucide/svelte';
+  import { ArrowLeft, StickyNote, Pencil, Check, X, Loader2, Film, RefreshCw, Download } from '@lucide/svelte';
   import { untrack } from 'svelte';
   import type { MegaNode } from '../mega';
   import { MegaService } from '../mega';
@@ -346,6 +346,34 @@
     }
   }
 
+  let downloadStarting = $state(false);
+
+  async function handleDownload() {
+    if (downloadStarting) return;
+    downloadStarting = true;
+    try {
+      // Dedicated session (separate from the player's) so the download keeps
+      // going after leaving this view — ranges are pulled through the SPA
+      // page, so it survives in-app navigation and only dies with the tab.
+      // Intentionally not cleaned up: unregistering would abort the download,
+      // and there's no reliable completion signal. Fewer connections than the
+      // player so the two transfers don't trip MEGA's parallel limit.
+      const { url } = await createStreamUrl(node.node, { maxConnections: 2 });
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = title;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (err) {
+      showToast(
+        `Download failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+    } finally {
+      downloadStarting = false;
+    }
+  }
+
   function nameKey(e: KeyboardEvent) {
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -526,6 +554,20 @@
             aria-label="Rename"
           >
             <Pencil size={16} />
+          </button>
+          <button
+            type="button"
+            onclick={handleDownload}
+            disabled={downloadStarting}
+            class="text-gray-500 hover:text-gray-200 p-1 rounded shrink-0 opacity-60 group-hover:opacity-100 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+            title="Download"
+            aria-label="Download"
+          >
+            {#if downloadStarting}
+              <Loader2 size={16} class="animate-spin" />
+            {:else}
+              <Download size={16} />
+            {/if}
           </button>
         </div>
       {/if}
