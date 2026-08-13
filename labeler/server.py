@@ -164,12 +164,26 @@ def infer_tags(img: Image.Image) -> dict:
     return out
 
 
+# Penetration defines a scene even when oral/hand play is simultaneously
+# more prominent in frame (group scenes: she sucks one guy while another is
+# inside her — the camera favours the upper body and fellatio outscores the
+# position tag). If any intercourse label clears this bar, it wins over
+# foreplay labels regardless of their (usually higher) confidence.
+INTERCOURSE = {"missionary", "doggy", "cowgirl", "reverse-cowgirl", "spooning", "standing"}
+SEX_PRIORITY_MIN = float(os.environ.get("SEX_PRIORITY_MIN", "0.35"))
+
+
 def pick_position(tags: dict):
     best_label, best_p = None, 0.0
+    best_sex, best_sex_p = None, 0.0
     for tag, label in POSITION_TAGS.items():
         p = tags.get(tag, 0.0)
         if p > best_p:
             best_label, best_p = label, p
+        if label in INTERCOURSE and p > best_sex_p:
+            best_sex, best_sex_p = label, p
+    if best_sex is not None and best_sex_p >= SEX_PRIORITY_MIN:
+        return best_sex, best_sex_p
     return best_label, best_p
 
 

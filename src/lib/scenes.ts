@@ -538,10 +538,16 @@ function dumpSweepDebug(
   data: SceneData
 ) {
   try {
-    console.log(
-      `[scene-scan] samples (${data.detector}): ` +
-        JSON.stringify(samples.map((s) => ({ t: s.t, p: s.position, c: s.confidence })))
-    );
+    // Chunked: the browser truncates very long console strings when saving
+    // logs, which cuts off exactly the part someone needs.
+    const compact = samples.map((s) => ({ t: s.t, p: s.position, c: s.confidence }));
+    const CHUNK = 60;
+    for (let i = 0; i < compact.length; i += CHUNK) {
+      console.log(
+        `[scene-scan] samples ${i / CHUNK + 1}/${Math.ceil(compact.length / CHUNK)} (${data.detector}): ` +
+          JSON.stringify(compact.slice(i, i + CHUNK))
+      );
+    }
     console.log('[scene-scan] scenes: ' + JSON.stringify(data.scenes));
   } catch (_) {}
 }
