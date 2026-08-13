@@ -173,11 +173,60 @@
     const input = e.currentTarget as HTMLInputElement;
     const files = input.files;
     if (!files || files.length === 0 || !currentFolder) return;
+    uploadFiles(Array.from(files));
+    input.value = '';
+  }
+
+  function uploadFiles(files: File[]) {
+    if (!currentFolder) return;
     const folder = currentFolder as unknown as Parameters<typeof enqueueUpload>[0];
-    for (const file of Array.from(files)) {
+    for (const file of files) {
       enqueueUpload(folder, file);
     }
-    input.value = '';
+  }
+
+  // Counter instead of a boolean: dragenter/dragleave fire for every child
+  // element crossed, so a plain flag flickers off mid-drag.
+  let dragDepth = $state(0);
+  const dropTargetActive = $derived(
+    dragDepth > 0 && !!currentFolder && router.current.kind !== 'file'
+  );
+
+  function dragHasFiles(e: DragEvent): boolean {
+    return !!e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files');
+  }
+
+  function handleWindowDragEnter(e: DragEvent) {
+    if (!dragHasFiles(e)) return;
+    e.preventDefault();
+    dragDepth++;
+  }
+
+  function handleWindowDragOver(e: DragEvent) {
+    if (!dragHasFiles(e)) return;
+    e.preventDefault();
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = dropTargetActive ? 'copy' : 'none';
+    }
+  }
+
+  function handleWindowDragLeave(e: DragEvent) {
+    if (!dragHasFiles(e)) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+  }
+
+  function handleWindowDrop(e: DragEvent) {
+    if (!dragHasFiles(e)) return;
+    e.preventDefault();
+    const wasActive = dropTargetActive;
+    dragDepth = 0;
+    if (!wasActive) return;
+    // Folders dragged from the OS appear as zero-byte files with no type;
+    // reading their stream throws, so skip anything we can't stream.
+    const files = Array.from(e.dataTransfer?.files ?? []).filter(
+      (f) => f.size > 0 || f.type !== ''
+    );
+    if (files.length > 0) uploadFiles(files);
   }
 
   async function refreshQuota(s: Storage) {
@@ -247,6 +296,13 @@
     else navigate({ kind: 'home' });
   }
 </script>
+
+<svelte:window
+  ondragenter={handleWindowDragEnter}
+  ondragover={handleWindowDragOver}
+  ondragleave={handleWindowDragLeave}
+  ondrop={handleWindowDrop}
+/>
 
 {#if restoring && !storage}
   <div class="min-h-screen bg-gray-950 text-gray-100 flex flex-col items-center justify-center gap-4">
@@ -328,6 +384,17 @@
           <div class="text-center py-20 text-gray-500">This folder is empty.</div>
         {/if}
       </main>
+    {/if}
+
+    {#if dropTargetActive}
+      <div class="fixed inset-0 z-50 pointer-events-none bg-gray-950/80 flex items-center justify-center p-8">
+        <div class="w-full h-full border-4 border-dashed border-red-500 rounded-2xl flex flex-col items-center justify-center gap-4 text-gray-100">
+          <Upload size={48} class="text-red-500" />
+          <p class="text-lg font-medium">
+            Drop files to upload to {pathFolders.length > 1 ? currentFolder?.name : 'Root'}
+          </p>
+        </div>
+      </div>
     {/if}
 
     <input
