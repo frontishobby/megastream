@@ -62,6 +62,8 @@ function installMessageHandler() {
   });
 }
 
+const RANGE_RETRIES = 3;
+
 function handleFetchRange(req: FetchRangeMessage, port: MessagePort) {
   const session = activeSessions.get(req.sessionId);
   if (!session) {
@@ -70,53 +72,80 @@ function handleFetchRange(req: FetchRangeMessage, port: MessagePort) {
     return;
   }
 
-  let stream: any;
-  try {
-    stream = session.node.download({
-      start: req.start,
-      end: req.end,
-      maxConnections: session.maxConnections,
-    });
-  } catch (err: any) {
-    safePost(port, { type: 'error', message: err?.message || String(err) });
-    safeClose(port);
-    return;
-  }
-
+  // A single transient MEGA hiccup used to kill the whole <video> element
+  // (fatal demuxer read error), so failed range downloads are resumed from
+  // the last delivered byte a few times before giving up.
   let cancelled = false;
+  let sent = 0;
+  let attempts = 0;
+  let stream: any = null;
+  let retryTimer: number | undefined;
+
   port.onmessage = (e) => {
     if (e.data && e.data.type === 'cancel') {
       cancelled = true;
-      try { stream.destroy?.(); } catch (_) {}
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
+      try { stream?.destroy?.(); } catch (_) {}
       safeClose(port);
     }
   };
 
-  stream.on('data', (chunk: Uint8Array) => {
-    if (cancelled) return;
-    const view = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk as any);
-    const copy = new Uint8Array(view.byteLength);
-    copy.set(view);
-    try {
-      port.postMessage({ type: 'chunk', chunk: copy.buffer }, [copy.buffer]);
-    } catch (_) {
-      cancelled = true;
-      try { stream.destroy?.(); } catch (_) {}
-    }
-  });
-
-  stream.on('end', () => {
-    if (cancelled) return;
-    safePost(port, { type: 'end' });
-    safeClose(port);
-  });
-
-  stream.on('error', (err: Error) => {
-    if (cancelled) return;
+  const fail = (err: any) => {
     showStreamErrorToast('Streaming failed', err);
     safePost(port, { type: 'error', message: err?.message || 'megajs stream error' });
     safeClose(port);
-  });
+  };
+
+  const startStream = () => {
+    if (cancelled) return;
+    try {
+      stream = session.node.download({
+        start: req.start + sent,
+        end: req.end,
+        maxConnections: session.maxConnections,
+      });
+    } catch (err: any) {
+      fail(err);
+      return;
+    }
+
+    stream.on('data', (chunk: Uint8Array) => {
+      if (cancelled) return;
+      const view = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk as any);
+      const copy = new Uint8Array(view.byteLength);
+      copy.set(view);
+      sent += copy.byteLength;
+      try {
+        port.postMessage({ type: 'chunk', chunk: copy.buffer }, [copy.buffer]);
+      } catch (_) {
+        cancelled = true;
+        try { stream.destroy?.(); } catch (_) {}
+      }
+    });
+
+    stream.on('end', () => {
+      if (cancelled) return;
+      safePost(port, { type: 'end' });
+      safeClose(port);
+    });
+
+    stream.on('error', (err: Error) => {
+      if (cancelled) return;
+      try { stream.destroy?.(); } catch (_) {}
+      attempts++;
+      if (attempts <= RANGE_RETRIES) {
+        console.warn(
+          `Range ${req.start}-${req.end} failed at +${sent} (attempt ${attempts}/${RANGE_RETRIES}), retrying:`,
+          err?.message || err
+        );
+        retryTimer = window.setTimeout(startStream, 1000 * attempts);
+        return;
+      }
+      fail(err);
+    });
+  };
+
+  startStream();
 }
 
 function safePost(port: MessagePort, msg: unknown) {
