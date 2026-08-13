@@ -14,6 +14,8 @@ export interface UploadJob {
   status: UploadStatus;
   error?: string;
   folderId: string;
+  /** Scene-scan progress 0-100; null until the scan reports anything. */
+  analysisPct: number | null;
 }
 
 const MAX_CONCURRENT = 3;
@@ -55,6 +57,7 @@ export function enqueueUpload(
     uploaded: 0,
     status: 'queued',
     folderId: folder.nodeId || '',
+    analysisPct: null,
   };
   _jobs.push(job);
   queue.push({ id, file, folder, sceneMode });
@@ -124,6 +127,12 @@ async function run(
     analysis = detectScenesFromFile(file, {
       signal: abort.signal,
       withLabels: sceneMode === 'labeled',
+      onProgress: (processed, duration) => {
+        const j = findJob(id);
+        if (j && duration > 0) {
+          j.analysisPct = Math.min(100, Math.round((processed / duration) * 100));
+        }
+      },
     }).catch((err) => {
       if (!abort.signal.aborted) console.warn('Scene analysis failed for', file.name, err);
       return null;

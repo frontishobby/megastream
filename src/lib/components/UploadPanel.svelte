@@ -87,9 +87,14 @@
                     {:else if job.status === 'queued'}
                       Queued
                     {:else if job.status === 'analyzing'}
-                      Uploaded · Detecting scenes…
+                      Uploaded · Detecting scenes… {job.analysisPct != null
+                        ? `${job.analysisPct}%`
+                        : ''}
                     {:else}
-                      {formatSize(job.uploaded)} / {formatSize(job.size)}
+                      {formatSize(job.uploaded)} / {formatSize(job.size)}{job.analysisPct !=
+                      null
+                        ? ` · Scan ${job.analysisPct}%`
+                        : ''}
                     {/if}
                   </span>
                   {#if job.status === 'uploading' || job.status === 'queued'}
