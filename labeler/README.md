@@ -7,6 +7,10 @@ the browser. This server never touches MEGA.
 
 ## Setup (Windows, NVIDIA GPU)
 
+Double-click `run.bat` (or run it from a terminal). It creates the venv,
+installs dependencies on first run (and whenever `requirements.txt`
+changes), and starts the server. Manual equivalent:
+
 ```
 cd labeler
 python -m venv .venv
