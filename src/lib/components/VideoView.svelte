@@ -1,10 +1,19 @@
 <script lang="ts">
-  import { ArrowLeft, StickyNote, Pencil, Check, X, Loader2 } from '@lucide/svelte';
+  import { ArrowLeft, StickyNote, Pencil, Check, X, Loader2, Film, RefreshCw } from '@lucide/svelte';
   import { untrack } from 'svelte';
   import type { MegaNode } from '../mega';
   import { MegaService } from '../mega';
   import { createStreamUrl } from '../stream';
   import { attachTsPlayer, isTransportStream } from '../tsPlayer';
+  import {
+    getStoredScenes,
+    detectScenesFromNode,
+    saveScenes,
+    sceneEvents,
+    type Scene,
+    type SceneData,
+  } from '../scenes';
+  import type { Storage } from 'megajs';
   import { showToast } from '../toast.svelte';
 
   let { node, onBack } = $props<{
@@ -43,6 +52,94 @@
   });
 
   const tsMode = $derived(isTransportStream(node.name));
+
+  // --- Scene navigation ---
+  let scenes = $state<SceneData | null>(null);
+  let scenesLoading = $state(true);
+  let detecting = $state<{ processed: number; duration: number } | null>(null);
+  let currentTime = $state(0);
+
+  $effect(() => {
+    const id = node.id;
+    const file = node.node;
+    let cancelled = false;
+    scenes = null;
+    scenesLoading = true;
+    getStoredScenes(id, file)
+      .then((d) => {
+        if (!cancelled) scenes = d;
+      })
+      .finally(() => {
+        if (!cancelled) scenesLoading = false;
+      });
+    // Refresh when a bulk scan (or another view) produces data for this video.
+    const onScenes = (e: Event) => {
+      if ((e as CustomEvent).detail !== id) return;
+      getStoredScenes(id, file).then((d) => {
+        if (!cancelled && d) scenes = d;
+      });
+    };
+    sceneEvents.addEventListener('scenes', onScenes);
+    return () => {
+      cancelled = true;
+      sceneEvents.removeEventListener('scenes', onScenes);
+    };
+  });
+
+  const activeSceneIndex = $derived.by(() => {
+    const list = scenes?.scenes;
+    if (!list || list.length === 0) return -1;
+    for (let k = list.length - 1; k >= 0; k--) {
+      if (currentTime >= list[k].start) return k;
+    }
+    return 0;
+  });
+
+  const detectPct = $derived(
+    detecting && detecting.duration > 0
+      ? Math.min(100, Math.round((detecting.processed / detecting.duration) * 100))
+      : 0
+  );
+
+  function onTimeUpdate() {
+    currentTime = videoEl?.currentTime ?? 0;
+  }
+
+  function jumpToScene(scene: Scene) {
+    if (!videoEl) return;
+    videoEl.currentTime = scene.start;
+    videoEl.play()?.catch?.(() => {});
+  }
+
+  async function handleDetectScenes() {
+    if (detecting) return;
+    detecting = { processed: 0, duration: 0 };
+    // The scan streams the same file; pause the player so the two transfers
+    // don't compete for MEGA's parallel-connection limit (which kills the
+    // player's stream with a demuxer read error).
+    const player = videoEl;
+    const wasPlaying = !!player && !player.paused && !player.ended;
+    try {
+      player?.pause();
+    } catch (_) {}
+    try {
+      const data = await detectScenesFromNode(node.node, {
+        onProgress: (processed, dur) => {
+          detecting = { processed, duration: dur };
+        },
+      });
+      const storage = (node.node as unknown as { storage?: Storage }).storage;
+      if (storage) await saveScenes(storage, node.id, data);
+      scenes = data;
+    } catch (err) {
+      showToast(
+        `Scene detection failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+    } finally {
+      detecting = null;
+      if (wasPlaying) player?.play().catch(() => {});
+    }
+  }
 
   $effect(() => {
     if (tsMode) return;
@@ -287,6 +384,7 @@
           autoplay
           playsinline
           onloadedmetadata={onLoadedMetadata}
+          ontimeupdate={onTimeUpdate}
           onerror={onVideoError}
           class="w-full h-full"
         >
@@ -299,6 +397,66 @@
           <p class="text-gray-400 animate-pulse">Preparing stream...</p>
         </div>
       {/if}
+    {/if}
+  </div>
+
+  <!-- Scene navigation strip -->
+  <div class="mt-3">
+    {#if scenes && scenes.scenes.length > 0}
+      <div class="flex items-center gap-2 overflow-x-auto pb-1">
+        <span class="shrink-0 text-xs text-gray-500 inline-flex items-center gap-1.5 pr-1">
+          <Film size={14} />
+          {scenes.scenes.length} scenes
+        </span>
+        {#each scenes.scenes as scene (scene.i)}
+          <button
+            type="button"
+            onclick={() => jumpToScene(scene)}
+            class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors {activeSceneIndex ===
+            scene.i
+              ? 'bg-red-600 text-white'
+              : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}"
+            title={`Scene ${scene.i + 1}: ${formatDuration(scene.start)} – ${formatDuration(scene.end)}`}
+          >
+            <span class={activeSceneIndex === scene.i ? 'text-red-200' : 'text-gray-500'}>
+              #{scene.i + 1}
+            </span>
+            <span>{formatDuration(scene.start)}</span>
+          </button>
+        {/each}
+        <button
+          type="button"
+          onclick={handleDetectScenes}
+          disabled={!!detecting}
+          class="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs text-gray-500 hover:text-gray-200 hover:bg-gray-800 disabled:cursor-not-allowed transition-colors"
+          title="Re-detect scenes"
+          aria-label="Re-detect scenes"
+        >
+          {#if detecting}
+            <Loader2 size={12} class="animate-spin" />
+            <span>{detectPct}%</span>
+          {:else}
+            <RefreshCw size={12} />
+          {/if}
+        </button>
+      </div>
+    {:else if scenesLoading}
+      <p class="text-gray-600 text-xs px-1">Loading scenes…</p>
+    {:else}
+      <button
+        type="button"
+        onclick={handleDetectScenes}
+        disabled={!!detecting}
+        class="inline-flex items-center gap-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-60 disabled:cursor-not-allowed text-gray-200 text-xs font-medium px-3 py-1.5 rounded-full transition-colors"
+      >
+        {#if detecting}
+          <Loader2 size={14} class="animate-spin" />
+          <span>Scanning… {detectPct}%</span>
+        {:else}
+          <Film size={14} />
+          <span>Detect scenes</span>
+        {/if}
+      </button>
     {/if}
   </div>
 

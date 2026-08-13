@@ -8,8 +8,10 @@ import { showToast, showStreamErrorToast } from './toast.svelte';
 // 188-byte packet boundary.
 
 interface MegaFileLike {
-  size: number;
-  name: string;
+  // megajs types size/name as optional; attachTsPlayer rejects at runtime if
+  // the size is absent
+  size?: number;
+  name?: string | null;
   download(opts: { start: number; end: number; maxConnections?: number }): any;
 }
 
@@ -20,7 +22,8 @@ const AHEAD_TARGET_SECS = 30;
 const PTS_CLOCK = 90000;
 const PTS_WRAP = 2 ** 33;
 
-export function isTransportStream(name: string): boolean {
+export function isTransportStream(name: string | null | undefined): boolean {
+  if (!name) return false;
   return name.toLowerCase().endsWith('.ts');
 }
 
@@ -273,10 +276,12 @@ export async function attachTsPlayer(
   video: HTMLVideoElement,
   node: MegaFileLike
 ): Promise<TsPlayerHandle> {
-  const size = node.size;
-  if (typeof size !== 'number' || size < TS_PACKET * 8) {
+  const rawSize = node.size;
+  if (typeof rawSize !== 'number' || rawSize < TS_PACKET * 8) {
     throw new Error('File size unknown or too small');
   }
+  // Rebound so the narrowed number type survives into the closures below.
+  const size = rawSize;
 
   let aborter = new AbortController();
 

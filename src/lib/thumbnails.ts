@@ -57,7 +57,7 @@ async function setCached(key: string, value: string): Promise<void> {
   } catch (_) {}
 }
 
-class Semaphore {
+export class Semaphore {
   private current = 0;
   private waiting: Array<() => void> = [];
   constructor(private max: number) {}
@@ -81,8 +81,8 @@ class Semaphore {
 const sem = new Semaphore(2);
 
 interface MegaFileLike {
-  size: number;
-  name: string;
+  size?: number;
+  name?: string | null;
   download(opts: { start: number; end: number; maxConnections?: number }): any;
 }
 
@@ -259,7 +259,7 @@ function thumbFileName(videoId: string, ext: ThumbExt): string {
 
 const THUMB_EXTS: ThumbExt[] = ['webp', 'jpg'];
 
-function findThumbFolder(storage: Storage): MutableFile | null {
+export function findThumbFolder(storage: Storage): MutableFile | null {
   const root = storage.root as unknown as MutableFile;
   const children = (root.children || []) as MutableFile[];
   return children.find((c) => c.directory && c.name === THUMB_FOLDER) ?? null;
@@ -330,14 +330,14 @@ interface VideoEntry {
   node: MegaFileLike;
 }
 
-async function ensureThumbFolder(storage: Storage): Promise<MutableFile> {
+export async function ensureThumbFolder(storage: Storage): Promise<MutableFile> {
   const existing = findThumbFolder(storage);
   if (existing) return existing;
   const root = storage.root as unknown as MutableFile;
   return (await root.mkdir({ name: THUMB_FOLDER })) as unknown as MutableFile;
 }
 
-function uploadBytes(folder: MutableFile, name: string, bytes: Uint8Array): Promise<void> {
+export function uploadBytes(folder: MutableFile, name: string, bytes: Uint8Array): Promise<void> {
   const stream = (folder as unknown as {
     upload(opts: { name: string; size: number }): {
       end(data: Uint8Array): void;

@@ -1,6 +1,8 @@
-import type { MutableFile } from 'megajs';
+import type { MutableFile, Storage } from 'megajs';
+import { MegaService } from './mega';
+import { detectScenesFromFile, saveScenes, type SceneData } from './scenes';
 
-export type UploadStatus = 'queued' | 'uploading' | 'done' | 'error' | 'cancelled';
+export type UploadStatus = 'queued' | 'uploading' | 'analyzing' | 'done' | 'error' | 'cancelled';
 
 export interface UploadJob {
   id: string;
@@ -56,8 +58,10 @@ export function clearFinishedUploads() {
 export function cancelUpload(jobId: string) {
   const job = findJob(jobId);
   if (!job) return;
-  if (job.status === 'uploading' || job.status === 'queued') {
-    job.status = 'cancelled';
+  if (job.status === 'uploading' || job.status === 'queued' || job.status === 'analyzing') {
+    // During 'analyzing' the upload itself already succeeded; cancelling
+    // just skips the scene scan and the job still completes as 'done'.
+    if (job.status !== 'analyzing') job.status = 'cancelled';
     cancellers.get(jobId)?.();
     cancellers.delete(jobId);
   }
@@ -93,12 +97,26 @@ async function run(id: string, file: File, folder: MutableFile) {
   if (!job) return;
   job.status = 'uploading';
   let uploadStream: any;
+  // Scene detection reads the File independently of the upload stream, so it
+  // runs in parallel with the (network-bound) upload and is usually done
+  // before the last byte is sent.
+  let analysisAbort: AbortController | null = null;
+  let analysis: Promise<SceneData | null> | null = null;
+  if (MegaService.isVideo(file.name)) {
+    const abort = new AbortController();
+    analysisAbort = abort;
+    analysis = detectScenesFromFile(file, { signal: abort.signal }).catch((err) => {
+      if (!abort.signal.aborted) console.warn('Scene analysis failed for', file.name, err);
+      return null;
+    });
+  }
   try {
     uploadStream = (folder as any).upload({ name: file.name, size: file.size });
     cancellers.set(id, () => {
       try {
         uploadStream?.destroy?.();
       } catch (_) {}
+      analysisAbort?.abort();
     });
 
     const reader = file.stream().getReader();
@@ -111,6 +129,7 @@ async function run(id: string, file: File, folder: MutableFile) {
         try {
           reader.cancel();
         } catch (_) {}
+        analysisAbort?.abort();
         scheduleAutoRemove(id);
         return;
       }
@@ -136,7 +155,28 @@ async function run(id: string, file: File, folder: MutableFile) {
       }
     }
     uploadStream.end();
-    await uploadStream.complete;
+    const uploadedNode = (await uploadStream.complete) as MutableFile | undefined;
+
+    if (analysis) {
+      const current = findJob(id);
+      if (current && current.status === 'uploading') {
+        current.status = 'analyzing';
+        current.uploaded = current.size;
+        const scenes = await analysis;
+        const storage = (folder as unknown as { storage?: Storage }).storage;
+        const videoId = (uploadedNode as unknown as { nodeId?: string } | undefined)?.nodeId;
+        if (scenes && storage && videoId) {
+          try {
+            await saveScenes(storage, videoId, scenes);
+          } catch (err) {
+            console.warn('Failed to save scene data for', file.name, err);
+          }
+        }
+      } else {
+        analysisAbort?.abort();
+      }
+    }
+
     const done = findJob(id);
     if (done) {
       done.status = 'done';
@@ -144,6 +184,7 @@ async function run(id: string, file: File, folder: MutableFile) {
       scheduleAutoRemove(id);
     }
   } catch (err) {
+    analysisAbort?.abort();
     const failed = findJob(id);
     if (!failed) return;
     if (failed.status === 'cancelled') {

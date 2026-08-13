@@ -1,8 +1,10 @@
 import { showStreamErrorToast } from './toast.svelte';
 
 interface MegaFileLike {
-  size: number;
-  name: string;
+  // megajs types size/name as optional; createStreamUrl rejects at runtime if
+  // the size is absent
+  size?: number;
+  name?: string | null;
   download(opts: { start: number; end: number; maxConnections?: number }): any;
 }
 
@@ -13,7 +15,12 @@ interface FetchRangeMessage {
   end: number;
 }
 
-const activeSessions = new Map<string, MegaFileLike>();
+interface SessionEntry {
+  node: MegaFileLike;
+  maxConnections: number;
+}
+
+const activeSessions = new Map<string, SessionEntry>();
 let swReadyPromise: Promise<void> | null = null;
 let messageHandlerInstalled = false;
 
@@ -56,8 +63,8 @@ function installMessageHandler() {
 }
 
 function handleFetchRange(req: FetchRangeMessage, port: MessagePort) {
-  const node = activeSessions.get(req.sessionId);
-  if (!node) {
+  const session = activeSessions.get(req.sessionId);
+  if (!session) {
     safePost(port, { type: 'error', message: 'Session not found' });
     safeClose(port);
     return;
@@ -65,7 +72,11 @@ function handleFetchRange(req: FetchRangeMessage, port: MessagePort) {
 
   let stream: any;
   try {
-    stream = node.download({ start: req.start, end: req.end, maxConnections: 4 });
+    stream = session.node.download({
+      start: req.start,
+      end: req.end,
+      maxConnections: session.maxConnections,
+    });
   } catch (err: any) {
     safePost(port, { type: 'error', message: err?.message || String(err) });
     safeClose(port);
@@ -131,7 +142,10 @@ function getMimeType(name: string): string {
   return map[ext] || 'application/octet-stream';
 }
 
-export async function createStreamUrl(node: MegaFileLike): Promise<{ url: string; cleanup: () => void }> {
+export async function createStreamUrl(
+  node: MegaFileLike,
+  opts: { maxConnections?: number } = {}
+): Promise<{ url: string; cleanup: () => void }> {
   await ensureServiceWorker();
   const controller = navigator.serviceWorker.controller;
   if (!controller) {
@@ -145,7 +159,7 @@ export async function createStreamUrl(node: MegaFileLike): Promise<{ url: string
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-  activeSessions.set(sessionId, node);
+  activeSessions.set(sessionId, { node, maxConnections: opts.maxConnections ?? 4 });
   await new Promise<void>((resolve, reject) => {
     const channel = new MessageChannel();
     const timer = setTimeout(() => {
@@ -163,7 +177,7 @@ export async function createStreamUrl(node: MegaFileLike): Promise<{ url: string
       type: 'register-session',
       sessionId,
       size: node.size,
-      mimeType: getMimeType(node.name),
+      mimeType: getMimeType(node.name || ''),
     }, [channel.port2]);
   });
 

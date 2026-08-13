@@ -17,7 +17,8 @@
   import UploadPanel from './lib/components/UploadPanel.svelte';
   import ToastHost from './lib/components/ToastHost.svelte';
   import { generateThumbnails } from './lib/thumbnails';
-  import { Loader2, AlertCircle, Upload, FolderPlus, Folder, ImagePlus } from '@lucide/svelte';
+  import { generateScenes } from './lib/scenes';
+  import { Loader2, AlertCircle, Upload, FolderPlus, Folder, ImagePlus, Film } from '@lucide/svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import './app.css';
 
@@ -168,6 +169,7 @@
 
   let creatingFolder = $state(false);
   let thumbGen = $state<{ done: number; total: number } | null>(null);
+  let sceneGen = $state<{ done: number; total: number } | null>(null);
 
   const videoNodes = $derived(
     nodes.filter((n) => n.type === 'file' && MegaService.isVideo(n.name))
@@ -189,6 +191,25 @@
       error = err instanceof Error ? err.message : String(err);
     } finally {
       thumbGen = null;
+    }
+  }
+
+  async function handleGenerateScenes() {
+    if (!storage || sceneGen) return;
+    const targets = videoNodes;
+    if (targets.length === 0) return;
+    sceneGen = { done: 0, total: targets.length };
+    try {
+      const result = await generateScenes(storage, targets, (p) => {
+        sceneGen = { done: p.done, total: p.total };
+      });
+      if (result.failed > 0) {
+        error = `Scene detection failed for ${result.failed} of ${targets.length} videos (unsupported codec or stream error)`;
+      }
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    } finally {
+      sceneGen = null;
     }
   }
 
@@ -401,6 +422,20 @@
           {/if}
 
           <div class="flex justify-end mb-4 gap-2">
+            <button
+              type="button"
+              onclick={handleGenerateScenes}
+              disabled={!currentFolder || !!sceneGen || videoNodes.length === 0}
+              class="inline-flex items-center gap-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 text-sm font-medium px-4 py-2 rounded-full transition-colors"
+            >
+              {#if sceneGen}
+                <Loader2 size={16} class="animate-spin" />
+                <span>Scenes {sceneGen.done}/{sceneGen.total}</span>
+              {:else}
+                <Film size={16} />
+                <span>Detect scenes</span>
+              {/if}
+            </button>
             <button
               type="button"
               onclick={handleGenerateThumbnails}

@@ -6,7 +6,9 @@
 
   const jobs = $derived(uploads.jobs);
   const active = $derived(
-    jobs.filter((j) => j.status === 'uploading' || j.status === 'queued').length
+    jobs.filter(
+      (j) => j.status === 'uploading' || j.status === 'queued' || j.status === 'analyzing'
+    ).length
   );
 
   function formatSize(bytes: number): string {
@@ -60,6 +62,8 @@
               <div class="mt-0.5 flex-shrink-0">
                 {#if job.status === 'uploading'}
                   <Loader2 size={14} class="text-red-400 animate-spin" />
+                {:else if job.status === 'analyzing'}
+                  <Loader2 size={14} class="text-amber-400 animate-spin" />
                 {:else if job.status === 'queued'}
                   <Loader2 size={14} class="text-gray-500" />
                 {:else if job.status === 'done'}
@@ -82,6 +86,8 @@
                       Cancelled
                     {:else if job.status === 'queued'}
                       Queued
+                    {:else if job.status === 'analyzing'}
+                      Uploaded · Detecting scenes…
                     {:else}
                       {formatSize(job.uploaded)} / {formatSize(job.size)}
                     {/if}
@@ -99,13 +105,13 @@
                   </div>
                 {/if}
               </div>
-              {#if job.status === 'uploading' || job.status === 'queued'}
+              {#if job.status === 'uploading' || job.status === 'queued' || job.status === 'analyzing'}
                 <button
                   type="button"
                   onclick={() => cancelUpload(job.id)}
                   class="text-gray-500 hover:text-red-400 p-0.5"
-                  title="Cancel"
-                  aria-label="Cancel"
+                  title={job.status === 'analyzing' ? 'Skip scene detection' : 'Cancel'}
+                  aria-label={job.status === 'analyzing' ? 'Skip scene detection' : 'Cancel'}
                 >
                   <X size={14} />
                 </button>
