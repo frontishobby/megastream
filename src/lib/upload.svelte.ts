@@ -1,5 +1,6 @@
 import type { MutableFile, Storage } from 'megajs';
 import { MegaService } from './mega';
+import { isTransportStream } from './stream';
 import { detectScenesFromFile, saveScenes, type SceneData } from './scenes';
 import { generateStripFromFile, saveStrip } from './strips';
 import type { SceneAnalysisMode } from './labeler';
@@ -121,7 +122,7 @@ async function run(
   // before the last byte is sent.
   let analysisAbort: AbortController | null = null;
   let analysis: Promise<SceneData | null> | null = null;
-  if (sceneMode !== 'skip' && MegaService.isVideo(file.name)) {
+  if (sceneMode !== 'skip' && MegaService.isVideo(file.name) && !isTransportStream(file.name)) {
     const abort = new AbortController();
     analysisAbort = abort;
     analysis = detectScenesFromFile(file, {

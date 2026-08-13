@@ -1,4 +1,4 @@
-import { createStreamUrl } from './stream';
+import { createStreamUrl, isTransportStream } from './stream';
 import type { Storage, MutableFile } from 'megajs';
 
 const DB_NAME = 'megastream';
@@ -320,7 +320,10 @@ export async function generateThumbnails(
 
   await Promise.all(
     videos.map(async (video) => {
-      if (THUMB_EXTS.some((ext) => existing.has(thumbFileName(video.id, ext)))) {
+      if (
+        THUMB_EXTS.some((ext) => existing.has(thumbFileName(video.id, ext))) ||
+        isTransportStream(video.name)
+      ) {
         result.skipped++;
         done++;
         report();

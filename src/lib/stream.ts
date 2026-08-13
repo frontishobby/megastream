@@ -24,6 +24,13 @@ const activeSessions = new Map<string, SessionEntry>();
 let swReadyPromise: Promise<void> | null = null;
 let messageHandlerInstalled = false;
 
+// MPEG-TS playback support was removed; .ts files stay listed so previously
+// generated thumbnails remain visible, but they can't be played or scanned.
+export function isTransportStream(name: string | null | undefined): boolean {
+  if (!name) return false;
+  return name.toLowerCase().endsWith('.ts');
+}
+
 export function isServiceWorkerSupported(): boolean {
   return typeof navigator !== 'undefined' && 'serviceWorker' in navigator;
 }

@@ -3,7 +3,7 @@
   import { untrack } from 'svelte';
   import type { MegaNode } from '../mega';
   import { MegaService } from '../mega';
-  import { createStreamUrl } from '../stream';
+  import { createStreamUrl, isTransportStream } from '../stream';
   import {
     getStoredScenes,
     detectScenesFromNode,
@@ -145,6 +145,11 @@
   }
 
   $effect(() => {
+    if (isTransportStream(node.name)) {
+      loading = false;
+      error = 'MPEG-TS (.ts) playback is no longer supported';
+      return;
+    }
     let cleanupFn: (() => void) | null = null;
     let cancelled = false;
 

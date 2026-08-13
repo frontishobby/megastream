@@ -4,7 +4,7 @@
 // pointer hovers (or a touch is held). Sits on top of the scenes sidecar —
 // videos without scene data keep their single-frame thumbnail.
 
-import { createStreamUrl } from './stream';
+import { createStreamUrl, isTransportStream } from './stream';
 import {
   Semaphore,
   ensureThumbFolder,
@@ -228,6 +228,7 @@ export async function generateStripFromNode(
   node: MegaFileLike,
   scenes: SceneData
 ): Promise<CapturedStrip | null> {
+  if (isTransportStream(node.name)) return null;
   const times = pickTimes(scenes);
   if (times.length === 0) return null;
   await stripSem.acquire();

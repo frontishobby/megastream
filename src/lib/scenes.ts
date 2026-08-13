@@ -1,4 +1,4 @@
-import { createStreamUrl } from './stream';
+import { createStreamUrl, isTransportStream } from './stream';
 import { Semaphore, ensureThumbFolder, findThumbFolder, uploadBytes } from './thumbnails';
 import { classifyFrame } from './labeler';
 import type { Storage, MutableFile } from 'megajs';
@@ -1037,7 +1037,9 @@ export async function generateScenes(
 
   for (const video of videos) {
     let skip = false;
-    if (withLabels) {
+    if (isTransportStream(video.name)) {
+      skip = true;
+    } else if (withLabels) {
       const stored = existing.has(scenesFileName(video.id))
         ? await getStoredScenes(video.id, video.node)
         : null;
