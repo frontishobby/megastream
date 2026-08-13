@@ -33,8 +33,14 @@ export const sceneEvents = new EventTarget();
 export interface SceneDetectOptions {
   /** Minimum media-time gap between analysed frames, seconds. */
   sampleInterval?: number;
-  /** Cuts closer together than this are merged, seconds. */
+  /** Minimum scene length, seconds (default 1.5 static / 30 labeled). */
   minSceneLen?: number;
+  /**
+   * Label mode: sliding majority-vote window in samples (odd). With multiple
+   * performers the tagger oscillates between two labels frame to frame;
+   * per-sample majority over this window kills the oscillation.
+   */
+  smoothWindow?: number;
   /** Per-block mean-abs-diff (0-255) above which a block counts as changed. */
   blockDiff?: number;
   /** Fraction of blocks that must change for a sample to be a cut candidate. */
@@ -354,7 +360,7 @@ async function runDetection(
 }
 
 const LABEL_FRAME_MAX_W = 512;
-const SWEEP_DETECTOR = 'label-sweep-v1';
+const SWEEP_DETECTOR = 'label-sweep-v2';
 
 /**
  * Labeler-driven detector: samples a frame every `labelInterval` seconds
@@ -368,7 +374,14 @@ async function runLabelSweep(
   duration: number,
   opts: SceneDetectOptions
 ): Promise<SceneData> {
-  const { labelInterval = 4, minSceneLen = 1.5, playbackRate = 4, signal, onProgress } = opts;
+  const {
+    labelInterval = 4,
+    minSceneLen = 30,
+    smoothWindow = 7,
+    playbackRate = 4,
+    signal,
+    onProgress,
+  } = opts;
 
   let prevT = -Infinity;
   let attempts = 0;
@@ -418,20 +431,27 @@ async function runLabelSweep(
     v: 1,
     duration,
     detector: SWEEP_DETECTOR,
-    scenes: buildLabeledScenes(samples, duration, minSceneLen, labelInterval),
+    scenes: buildLabeledScenes(samples, duration, minSceneLen, labelInterval, smoothWindow),
   };
 }
 
 /**
- * Turns the label sample sequence into scenes. Hysteresis smoothing: the
- * label only switches when two consecutive samples agree on the new label,
- * so a single misclassified frame never splits a scene.
+ * Turns the label sample sequence into scenes in three steps:
+ *
+ * 1. Sliding majority vote — each sample is relabelled to the
+ *    confidence-weighted majority of its surrounding window, which absorbs
+ *    both single misclassifications and two-label oscillation in
+ *    multi-performer scenes.
+ * 2. Runs of identical smoothed labels become scenes.
+ * 3. Scenes shorter than minSceneLen are folded into their longer
+ *    neighbour until every scene meets the minimum.
  */
 function buildLabeledScenes(
   samples: Array<{ t: number; position: string | null; confidence: number | null }>,
   duration: number,
   minSceneLen: number,
-  labelInterval: number
+  labelInterval: number,
+  smoothWindow: number
 ): Scene[] {
   const wholeVideo: Scene = {
     i: 0,
@@ -442,66 +462,99 @@ function buildLabeledScenes(
   };
   if (samples.length === 0) return [wholeVideo];
 
-  interface Run {
-    label: string;
+  // 1) Majority smoothing. "none" samples carry no confidence; give them a
+  // modest fixed weight so sparse none-blips lose to surrounding labels but
+  // genuinely unlabelled stretches still win.
+  const half = Math.max(1, Math.floor(smoothWindow / 2));
+  const weightOf = (s: { confidence: number | null }) => s.confidence ?? 0.4;
+  const smoothed: string[] = samples.map((_, i) => {
+    const votes = new Map<string, number>();
+    for (let k = Math.max(0, i - half); k <= Math.min(samples.length - 1, i + half); k++) {
+      const label = samples[k].position ?? 'none';
+      votes.set(label, (votes.get(label) ?? 0) + weightOf(samples[k]));
+    }
+    let best = 'none';
+    let bestW = -1;
+    for (const [label, w] of votes) {
+      if (w > bestW) {
+        best = label;
+        bestW = w;
+      }
+    }
+    return best;
+  });
+
+  // 2) Runs of identical smoothed labels.
+  interface Segment {
     start: number;
+    end: number;
+    label: string;
     confs: number[];
   }
-  const runs: Run[] = [];
-  let cur: Run | null = null;
-  let pending: { label: string; t: number; conf: number | null } | null = null;
-
-  for (const s of samples) {
-    const label = s.position ?? 'none';
-    if (!cur) {
-      cur = { label, start: 0, confs: s.confidence != null ? [s.confidence] : [] };
-      runs.push(cur);
+  const segments: Segment[] = [];
+  for (let i = 0; i < samples.length; i++) {
+    const label = smoothed[i];
+    const last = segments[segments.length - 1];
+    if (last && last.label === label) {
+      if (samples[i].confidence != null) last.confs.push(samples[i].confidence!);
       continue;
     }
-    if (label === cur.label) {
-      if (s.confidence != null) cur.confs.push(s.confidence);
-      pending = null;
-      continue;
-    }
-    if (pending && pending.label === label) {
-      // Two consecutive samples agree on a new label: switch, placing the
-      // boundary just before the first sample of the pair (the transition
-      // happened somewhere in the preceding interval).
-      const start = Math.max(cur.start, round2(pending.t - labelInterval / 2));
-      cur = { label, start, confs: [] };
-      if (pending.conf != null) cur.confs.push(pending.conf);
-      if (s.confidence != null) cur.confs.push(s.confidence);
-      runs.push(cur);
-      pending = null;
-    } else {
-      pending = { label, t: s.t, conf: s.confidence };
-    }
-  }
-
-  const scenes: Scene[] = [];
-  for (let k = 0; k < runs.length; k++) {
-    const start = runs[k].start;
-    const end = k + 1 < runs.length ? runs[k + 1].start : duration;
-    if (end - start <= 0) continue;
-    const confs = runs[k].confs;
-    scenes.push({
-      i: scenes.length,
-      start: round2(start),
-      end: round2(end),
-      position: runs[k].label === 'none' ? null : runs[k].label,
-      confidence: confs.length
-        ? round2(confs.reduce((a, b) => a + b, 0) / confs.length)
-        : null,
+    // The transition happened somewhere in the interval before this sample.
+    const start = last ? Math.max(last.start, round2(samples[i].t - labelInterval / 2)) : 0;
+    if (last) last.end = start;
+    segments.push({
+      start,
+      end: duration,
+      label,
+      confs: samples[i].confidence != null ? [samples[i].confidence!] : [],
     });
   }
-  // Fold a too-short tail into the previous scene.
-  if (scenes.length >= 2) {
-    const tail = scenes[scenes.length - 1];
-    if (tail.end - tail.start < minSceneLen) {
-      scenes[scenes.length - 2].end = tail.end;
-      scenes.pop();
+
+  // 3) Fold sub-minimum scenes into their longer neighbour (coalescing
+  // same-label neighbours as they meet) until everything is long enough.
+  let changed = true;
+  while (changed && segments.length > 1) {
+    changed = false;
+    for (let i = segments.length - 2; i >= 0; i--) {
+      if (segments[i].label === segments[i + 1].label) {
+        segments[i].end = segments[i + 1].end;
+        segments[i].confs.push(...segments[i + 1].confs);
+        segments.splice(i + 1, 1);
+        changed = true;
+      }
     }
+    let idx = -1;
+    let shortest = Infinity;
+    for (let i = 0; i < segments.length; i++) {
+      const len = segments[i].end - segments[i].start;
+      if (len < minSceneLen && len < shortest) {
+        shortest = len;
+        idx = i;
+      }
+    }
+    if (idx === -1 || segments.length <= 1) break;
+    const prev = idx > 0 ? segments[idx - 1] : null;
+    const next = idx < segments.length - 1 ? segments[idx + 1] : null;
+    const intoPrev =
+      prev && (!next || prev.end - prev.start >= next.end - next.start);
+    if (intoPrev && prev) {
+      prev.end = segments[idx].end;
+    } else if (next) {
+      next.start = segments[idx].start;
+    }
+    segments.splice(idx, 1);
+    changed = true;
   }
+
+  const scenes: Scene[] = segments.map((seg, i) => ({
+    i,
+    start: round2(seg.start),
+    end: round2(seg.end),
+    position: seg.label === 'none' ? null : seg.label,
+    confidence: seg.confs.length
+      ? round2(seg.confs.reduce((a, b) => a + b, 0) / seg.confs.length)
+      : null,
+  }));
   return scenes.length ? scenes : [wholeVideo];
 }
 
