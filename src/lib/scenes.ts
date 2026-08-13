@@ -489,89 +489,6 @@ function aggregateVideoTags(samples: Array<{ tags?: Record<string, number> }>): 
   return out.slice(0, MAX_VIDEO_TAGS);
 }
 
-/**
- * Labeler-driven detector: samples a frame every `labelInterval` seconds
- * during the playback pass, classifies each via the local labeler, and turns
- * runs of identical position labels into scenes. Camera cuts within the same
- * position merge; position changes inside a single take split — scene
- * boundaries follow what is happening, not how it was edited.
- */
-async function runLabelSweep(
-  video: HTMLVideoElement,
-  duration: number,
-  opts: SceneDetectOptions
-): Promise<SceneData> {
-  const {
-    labelInterval = 4,
-    minSceneLen = 30,
-    smoothWindow = 7,
-    playbackRate = 4,
-    signal,
-    onProgress,
-  } = opts;
-
-  let prevT = -Infinity;
-  let attempts = 0;
-  const samples: InternalSample[] = [];
-  // Serial classification queue: at 4x playback a sample arrives roughly
-  // once per wall-clock second and GPU classification is far faster, so the
-  // queue drains as it fills; playback never waits on it.
-  let chain: Promise<void> = Promise.resolve();
-
-  const capture = (mediaTime: number) => {
-    if (mediaTime - prevT < labelInterval) return;
-    if (!video.videoWidth) return;
-    prevT = mediaTime;
-    // Fresh canvas per capture: encoding happens async in the queue and a
-    // shared canvas would be overwritten by the next sample.
-    const canvas = document.createElement('canvas');
-    const scale = Math.min(1, LABEL_FRAME_MAX_W / video.videoWidth);
-    canvas.width = Math.round(video.videoWidth * scale);
-    canvas.height = Math.round(video.videoHeight * scale);
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    try {
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    } catch (_) {
-      return;
-    }
-    attempts++;
-    chain = chain.then(async () => {
-      const blob = await new Promise<Blob | null>((resolve) =>
-        canvas.toBlob(resolve, 'image/jpeg', 0.8)
-      );
-      if (!blob) return;
-      const label = await classifyFrame(blob, mediaTime);
-      if (!label) return; // request failed — no vote, not a "none"
-      samples.push({
-        t: mediaTime,
-        position: label.position,
-        confidence: label.confidence,
-        positions: label.positions,
-        tags: label.tags,
-      });
-    });
-  };
-
-  await runPlaybackPass(video, duration, { playbackRate, signal, onProgress }, capture);
-  await chain;
-
-  if (attempts > 0 && samples.length === 0) {
-    throw new Error('labeler did not respond during the scan');
-  }
-
-  const data: SceneData = {
-    v: 1,
-    duration,
-    detector: SWEEP_DETECTOR,
-    scenes: buildLabeledScenes(samples, duration, minSceneLen, labelInterval, smoothWindow),
-    videoTags: aggregateVideoTags(samples),
-    samples: compactSamples(samples),
-  };
-  dumpSweepDebug(samples, data);
-  return data;
-}
-
 // One-line JSON dumps for diagnosing label quality: copy the
 // "[scene-scan] samples" line from the console to see exactly what the
 // tagger said at every timestamp before smoothing/merging.
@@ -612,11 +529,12 @@ function waitSeekComplete(video: HTMLVideoElement, timeoutMs: number): Promise<v
 /**
  * Seek-stepping variant of the label sweep for local files: instead of
  * playing the video through in real time, jump straight to each sample
- * point and capture it. Local random access makes a seek cost ~100ms of
- * decode, so a 30-minute file scans in about a minute instead of the 7.5
- * minutes a 4x playback pass takes — and the GPU stays busy because
- * classification runs while the next seek is decoding. Remote streams keep
- * the playback pass: there each seek would trigger fresh range downloads.
+ * point and capture it. Local files: a seek costs ~100ms of decode, so a
+ * 30-minute file scans in about a minute. Remote streams: hops are strictly
+ * ascending, so they mostly land inside the element's readahead buffer and
+ * the scan runs at download speed instead of a playback clock. In both
+ * cases classification overlaps the next seek, keeping the GPU busy, and
+ * nothing depends on playback callbacks so hidden tabs keep scanning.
  */
 async function runLabelSweepSeek(
   video: HTMLVideoElement,
@@ -847,14 +765,6 @@ function buildLabeledScenes(
   return scenes.length ? scenes : [wholeVideo];
 }
 
-function detectWith(
-  video: HTMLVideoElement,
-  duration: number,
-  opts: SceneDetectOptions
-): Promise<SceneData> {
-  return opts.withLabels ? runLabelSweep(video, duration, opts) : runDetection(video, duration, opts);
-}
-
 /** Scans a local file (e.g. one that is currently uploading) — no network. */
 export async function detectScenesFromFile(
   file: File,
@@ -897,7 +807,14 @@ export async function detectScenesFromNode(
       await waitMetadata(video);
       const duration = video.duration;
       if (!isFinite(duration) || duration <= 0) throw new Error('invalid duration');
-      return await detectWith(video, duration, opts);
+      // Labelled scans seek-step here too: hops are strictly ascending 4s
+      // steps, which land inside the element's readahead buffer most of the
+      // time — so the scan runs at download speed instead of being clamped
+      // to the 4x playback clock. The static detector needs dense frames
+      // and keeps the playback pass.
+      return opts.withLabels
+        ? await runLabelSweepSeek(video, duration, opts)
+        : await runDetection(video, duration, opts);
     } finally {
       teardownVideo(video);
       cleanup();
@@ -1016,9 +933,12 @@ interface VideoEntry {
  * `.megastream/<nodeId>.scenes.json`. Skipping is version-aware in labelled
  * mode: sidecars from older detectors (static fallback, pre-v4 sweeps) get
  * re-scanned, so one button press upgrades the whole library and an
- * interrupted batch resumes where it left off. Sequential on purpose: each
- * scan streams the whole file.
+ * interrupted batch resumes where it left off. Two videos scan at a time:
+ * one MEGA stream rarely saturates the link, and the GPU is nowhere near
+ * its limit.
  */
+const BULK_CONCURRENCY = 2;
+
 export async function generateScenes(
   storage: Storage,
   videos: VideoEntry[],
@@ -1035,37 +955,41 @@ export async function generateScenes(
   const report = () => onProgress?.({ done, total: videos.length });
   report();
 
-  for (const video of videos) {
-    let skip = false;
-    if (isTransportStream(video.name)) {
-      skip = true;
-    } else if (withLabels) {
-      const stored = existing.has(scenesFileName(video.id))
-        ? await getStoredScenes(video.id, video.node)
-        : null;
-      skip = stored?.detector === SWEEP_DETECTOR;
-    } else {
-      // Static fallback can't improve on any existing data.
-      skip = existing.has(scenesFileName(video.id));
+  const queue = [...videos];
+  const worker = async () => {
+    for (let video = queue.shift(); video; video = queue.shift()) {
+      let skip = false;
+      if (isTransportStream(video.name)) {
+        skip = true;
+      } else if (withLabels) {
+        const stored = existing.has(scenesFileName(video.id))
+          ? await getStoredScenes(video.id, video.node)
+          : null;
+        skip = stored?.detector === SWEEP_DETECTOR;
+      } else {
+        // Static fallback can't improve on any existing data.
+        skip = existing.has(scenesFileName(video.id));
+      }
+      if (skip) {
+        result.skipped++;
+        done++;
+        report();
+        continue;
+      }
+      try {
+        const data = await detectScenesFromNode(video.node, { withLabels });
+        await saveScenes(storage, video.id, data, video.node as unknown as MutableFile);
+        result.generated++;
+      } catch (err) {
+        console.warn('Scene detection failed for', video.name, err);
+        result.failed++;
+      } finally {
+        done++;
+        report();
+      }
     }
-    if (skip) {
-      result.skipped++;
-      done++;
-      report();
-      continue;
-    }
-    try {
-      const data = await detectScenesFromNode(video.node, { withLabels });
-      await saveScenes(storage, video.id, data, video.node as unknown as MutableFile);
-      result.generated++;
-    } catch (err) {
-      console.warn('Scene detection failed for', video.name, err);
-      result.failed++;
-    } finally {
-      done++;
-      report();
-    }
-  }
+  };
+  await Promise.all(Array.from({ length: BULK_CONCURRENCY }, () => worker()));
 
   return result;
 }
