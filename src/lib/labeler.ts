@@ -33,9 +33,12 @@ export interface FrameLabel {
   tags: Record<string, number>;
 }
 
-export async function classifyFrame(frame: Blob): Promise<FrameLabel | null> {
+export async function classifyFrame(frame: Blob, mediaTime?: number): Promise<FrameLabel | null> {
   try {
-    const res = await fetch(`${labelerUrl()}/classify`, {
+    // media time rides along purely so the server log shows where in the
+    // video each classification happened.
+    const q = mediaTime != null ? `?t=${mediaTime.toFixed(1)}` : '';
+    const res = await fetch(`${labelerUrl()}/classify${q}`, {
       method: 'POST',
       body: frame,
       headers: { 'Content-Type': 'image/jpeg' },

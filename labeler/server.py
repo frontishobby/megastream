@@ -227,8 +227,11 @@ async def classify(request: Request):
 
     top = dict(sorted(tags.items(), key=lambda kv: -kv[1])[:TOP_TAGS])
     top3 = ", ".join(f"{k}:{v:.2f}" for k, v in list(top.items())[:3])
+    # Media time supplied by the browser purely for these logs.
+    t = request.query_params.get("t")
+    at = f" @{float(t):7.1f}s" if t else ""
     print(
-        f"classify: {position or 'none'}"
+        f"classify{at}: {position or 'none'}"
         + (f" ({conf:.2f}, {source})" if position else "")
         + (f" | top tags: {top3}" if top3 else "")
     )

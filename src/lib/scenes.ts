@@ -501,7 +501,7 @@ async function runLabelSweep(
         canvas.toBlob(resolve, 'image/jpeg', 0.8)
       );
       if (!blob) return;
-      const label = await classifyFrame(blob);
+      const label = await classifyFrame(blob, mediaTime);
       if (!label) return; // request failed — no vote, not a "none"
       samples.push({
         t: mediaTime,
@@ -519,13 +519,31 @@ async function runLabelSweep(
     throw new Error('labeler did not respond during the scan');
   }
 
-  return {
+  const data: SceneData = {
     v: 1,
     duration,
     detector: SWEEP_DETECTOR,
     scenes: buildLabeledScenes(samples, duration, minSceneLen, labelInterval, smoothWindow),
     videoTags: aggregateVideoTags(samples),
   };
+  dumpSweepDebug(samples, data);
+  return data;
+}
+
+// One-line JSON dumps for diagnosing label quality: copy the
+// "[scene-scan] samples" line from the console to see exactly what the
+// tagger said at every timestamp before smoothing/merging.
+function dumpSweepDebug(
+  samples: Array<{ t: number; position: string | null; confidence: number | null }>,
+  data: SceneData
+) {
+  try {
+    console.log(
+      `[scene-scan] samples (${data.detector}): ` +
+        JSON.stringify(samples.map((s) => ({ t: s.t, p: s.position, c: s.confidence })))
+    );
+    console.log('[scene-scan] scenes: ' + JSON.stringify(data.scenes));
+  } catch (_) {}
 }
 
 function waitSeekComplete(video: HTMLVideoElement, timeoutMs: number): Promise<void> {
@@ -601,7 +619,7 @@ async function runLabelSweepSeek(
           canvas.toBlob(resolve, 'image/jpeg', 0.8)
         );
         if (!blob) return;
-        const label = await classifyFrame(blob);
+        const label = await classifyFrame(blob, at);
         if (!label) return; // request failed — no vote, not a "none"
         samples.push({
           t: at,
@@ -622,13 +640,15 @@ async function runLabelSweepSeek(
   // Classification finishes out of order; the run builder needs time order.
   samples.sort((a, b) => a.t - b.t);
 
-  return {
+  const data: SceneData = {
     v: 1,
     duration,
     detector: SWEEP_DETECTOR,
     scenes: buildLabeledScenes(samples, duration, minSceneLen, labelInterval, smoothWindow),
     videoTags: aggregateVideoTags(samples),
   };
+  dumpSweepDebug(samples, data);
+  return data;
 }
 
 /**
