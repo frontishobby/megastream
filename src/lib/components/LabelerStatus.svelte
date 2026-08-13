@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { probeLabeler, labelerUrl } from '../labeler';
 
   // null = probe in flight (first check), boolean = last known state.
@@ -15,7 +16,10 @@
     }
   }
 
-  $effect(() => {
+  // onMount, not $effect: check() reads/writes the state above, and inside
+  // an $effect those reads become dependencies — every probe would re-run
+  // the effect and spam /health in a loop.
+  onMount(() => {
     check();
     const timer = setInterval(check, 30000);
     return () => clearInterval(timer);
