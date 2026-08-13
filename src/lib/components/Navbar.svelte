@@ -2,6 +2,7 @@
   import { Play, LogOut } from '@lucide/svelte';
   import Breadcrumb from './Breadcrumb.svelte';
   import QuotaInfo from './QuotaInfo.svelte';
+  import LabelerStatus from './LabelerStatus.svelte';
 
   let { path, accountEmail, quota, onNavigate, onLogout } = $props<{
     path: { name: string }[];
@@ -28,6 +29,7 @@
         <Breadcrumb {path} {onNavigate} />
       </div>
       <div class="flex items-center gap-3 flex-shrink-0">
+        <LabelerStatus />
         {#if quota}
           <div class="hidden lg:block">
             <QuotaInfo
