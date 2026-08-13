@@ -22,3 +22,11 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Python (labeler)
+__pycache__/
+*.pyc
+labeler/.venv/
+
+# Playwright MCP session artifacts
+.playwright-mcp/
