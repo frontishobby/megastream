@@ -62,11 +62,32 @@ function installMessageHandler() {
   messageHandlerInstalled = true;
   navigator.serviceWorker.addEventListener('message', (event) => {
     const data = event.data;
-    if (!data || data.type !== 'fetch-range') return;
+    if (!data) return;
     const port = event.ports[0];
     if (!port) return;
-    handleFetchRange(data as FetchRangeMessage, port);
+    if (data.type === 'fetch-range') {
+      handleFetchRange(data as FetchRangeMessage, port);
+    } else if (data.type === 'resolve-session') {
+      handleResolveSession(data.sessionId, port);
+    }
   });
+}
+
+// A restarted service worker (idle-killed, empty session map) asks pages to
+// re-register sessions so playback continues instead of 404ing mid-stream.
+function handleResolveSession(sessionId: string, port: MessagePort) {
+  const session = activeSessions.get(sessionId);
+  if (session && typeof session.node.size === 'number') {
+    safePost(port, {
+      type: 'session-info',
+      found: true,
+      size: session.node.size,
+      mimeType: getMimeType(session.node.name || ''),
+    });
+  } else {
+    safePost(port, { type: 'session-info', found: false });
+  }
+  safeClose(port);
 }
 
 const RANGE_RETRIES = 3;

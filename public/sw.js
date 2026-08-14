@@ -34,13 +34,47 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin) return;
   if (!url.pathname.startsWith(STREAM_PATH)) return;
   const sessionId = url.pathname.slice(STREAM_PATH.length);
-  const session = sessions.get(sessionId);
-  if (!session) {
-    event.respondWith(new Response('Unknown session', { status: 404 }));
-    return;
-  }
-  event.respondWith(handleStreamRequest(event.request, sessionId, session, url));
+  event.respondWith((async () => {
+    // The browser terminates idle service workers, wiping the in-memory
+    // session map mid-playback; the page still holds the session, so ask
+    // open clients to re-register before giving up with a 404.
+    let session = sessions.get(sessionId);
+    if (!session) session = await resolveSessionFromClients(sessionId);
+    if (!session) return new Response('Unknown session', { status: 404 });
+    return handleStreamRequest(event.request, sessionId, session, url);
+  })());
 });
+
+async function resolveSessionFromClients(sessionId) {
+  const clients = await self.clients.matchAll({ type: 'window' });
+  for (const client of clients) {
+    const info = await new Promise((resolve) => {
+      const channel = new MessageChannel();
+      const timer = setTimeout(() => {
+        try { channel.port1.close(); } catch (_) {}
+        resolve(null);
+      }, 2000);
+      channel.port1.onmessage = (e) => {
+        clearTimeout(timer);
+        try { channel.port1.close(); } catch (_) {}
+        const d = e.data;
+        resolve(d && d.type === 'session-info' && d.found ? d : null);
+      };
+      try {
+        client.postMessage({ type: 'resolve-session', sessionId }, [channel.port2]);
+      } catch (_) {
+        clearTimeout(timer);
+        resolve(null);
+      }
+    });
+    if (info) {
+      const session = { size: info.size, mimeType: info.mimeType, clientId: client.id };
+      sessions.set(sessionId, session);
+      return session;
+    }
+  }
+  return null;
+}
 
 async function handleStreamRequest(request, sessionId, session, url) {
   const { size, mimeType, clientId } = session;
