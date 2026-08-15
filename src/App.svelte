@@ -473,7 +473,7 @@
             </div>
           {/if}
 
-          <div class="flex justify-end mb-4 gap-2">
+          <div class="flex flex-wrap justify-end mb-4 gap-2">
             <button
               type="button"
               onclick={() => navigate({ kind: 'shorts', scope: 'all' })}

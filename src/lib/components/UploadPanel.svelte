@@ -25,7 +25,7 @@
 </script>
 
 {#if jobs.length > 0}
-  <div class="fixed bottom-4 right-4 z-40 w-80 bg-gray-900 border border-gray-700 rounded-lg shadow-2xl overflow-hidden">
+  <div class="fixed bottom-4 right-4 z-40 w-80 max-w-[calc(100vw-2rem)] bg-gray-900 border border-gray-700 rounded-lg shadow-2xl overflow-hidden">
     <button
       type="button"
       onclick={() => (collapsed = !collapsed)}

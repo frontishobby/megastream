@@ -45,7 +45,7 @@
 </script>
 
 {#if hasStorage || hasBandwidth || bandwidthUsed}
-  <div class="flex items-center gap-4 text-xs">
+  <div class="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
     {#if hasStorage}
       <div
         class="flex items-center gap-2"

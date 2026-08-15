@@ -355,11 +355,11 @@
   }
 </script>
 
-<div class="flex-1 w-full max-w-[1920px] mx-auto py-6">
+<div class="flex-1 w-full max-w-[1920px] mx-auto py-4 md:py-6">
   <button
     type="button"
     onclick={onBack}
-    class="inline-flex items-center gap-2 text-gray-400 hover:text-white text-sm mb-4 px-3 py-1.5 rounded-full hover:bg-gray-800 transition-colors"
+    class="inline-flex items-center gap-2 text-gray-400 hover:text-white text-sm mb-4 mx-1 md:mx-3 px-3 py-1.5 rounded-full hover:bg-gray-800 transition-colors"
   >
     <ArrowLeft size={16} />
     <span>Back</span>
@@ -403,7 +403,7 @@
   </div>
 
   <!-- Scene navigation strip -->
-  <div class="mt-3">
+  <div class="mt-3 px-4 md:px-6">
     {#if scenes && scenes.scenes.length > 0}
       <div class="flex items-center gap-2 overflow-x-auto pb-1">
         <span class="shrink-0 text-xs text-gray-500 inline-flex items-center gap-1.5 pr-1">
@@ -471,7 +471,7 @@
     {/if}
   </div>
 
-  <div class="mt-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
+  <div class="mt-6 grid grid-cols-1 lg:grid-cols-3 gap-6 px-4 md:px-6">
     <div class="lg:col-span-2 space-y-4">
       {#if renaming}
         <div>

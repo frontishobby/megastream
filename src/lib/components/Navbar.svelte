@@ -20,15 +20,15 @@
 
 <nav class="bg-gray-900 text-white p-4 sticky top-0 z-10 shadow-lg">
   <div class="container mx-auto flex flex-col gap-3">
-    <div class="flex flex-col md:flex-row items-stretch md:items-center gap-4">
+    <div class="flex flex-wrap md:flex-nowrap items-center gap-x-4 gap-y-3">
       <div class="flex items-center gap-2 flex-shrink-0">
         <Play class="text-red-500 fill-current" size={28} />
         <h1 class="text-xl font-bold tracking-tight">MegaPlay</h1>
       </div>
-      <div class="flex-1 min-w-0">
+      <div class="order-3 md:order-none w-full md:w-auto md:flex-1 min-w-0">
         <Breadcrumb {path} {onNavigate} />
       </div>
-      <div class="flex items-center gap-3 flex-shrink-0">
+      <div class="flex items-center gap-3 flex-shrink-0 ml-auto min-w-0">
         <LabelerStatus />
         {#if quota}
           <div class="hidden lg:block">
