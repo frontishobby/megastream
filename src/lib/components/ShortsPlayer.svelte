@@ -448,27 +448,67 @@
     skipFlashTimer = setTimeout(() => (skipFlash = null), 700);
   }
 
-  // --- Fullscreen / orientation (best-effort; iOS gets the overlay only) ---
+  // --- Fullscreen / orientation (best-effort) ---
+  // iPhone WebKit (Safari and Chrome alike) has no element fullscreen API, so
+  // the browser chrome can't be hidden around the overlay. There the entry
+  // request is a no-op and the fullscreen button falls back to the native
+  // <video> fullscreen player (webkitEnterFullscreen) — gestures don't work
+  // inside it, but it's the only true fullscreen iPhone allows.
+  const fsDoc = document as Document & {
+    webkitFullscreenEnabled?: boolean;
+    webkitFullscreenElement?: Element | null;
+    webkitExitFullscreen?: () => void;
+  };
+  const fsRoot = document.documentElement as HTMLElement & {
+    webkitRequestFullscreen?: () => void;
+  };
+  const canElementFullscreen =
+    !!document.fullscreenEnabled || !!fsDoc.webkitFullscreenEnabled;
+
+  function fullscreenElement(): Element | null {
+    return document.fullscreenElement ?? fsDoc.webkitFullscreenElement ?? null;
+  }
+
+  function enterPageFullscreen() {
+    if (fsRoot.requestFullscreen) fsRoot.requestFullscreen().catch(() => {});
+    else fsRoot.webkitRequestFullscreen?.();
+  }
+
+  function exitPageFullscreen() {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    else if (fsDoc.webkitFullscreenElement) fsDoc.webkitExitFullscreen?.();
+  }
+
   $effect(() => {
-    document.documentElement.requestFullscreen?.().catch(() => {});
+    if (canElementFullscreen) enterPageFullscreen();
     (screen.orientation as unknown as { lock?: (o: string) => Promise<void> })
       ?.lock?.('landscape')
       .catch(() => {});
     const onFs = () => {
-      fullscreen = !!document.fullscreenElement;
+      fullscreen = !!fullscreenElement();
     };
     onFs();
     document.addEventListener('fullscreenchange', onFs);
+    document.addEventListener('webkitfullscreenchange', onFs);
     return () => {
       document.removeEventListener('fullscreenchange', onFs);
+      document.removeEventListener('webkitfullscreenchange', onFs);
       (screen.orientation as unknown as { unlock?: () => void })?.unlock?.();
-      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+      if (fullscreenElement()) exitPageFullscreen();
     };
   });
 
   function toggleFullscreen() {
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-    else document.documentElement.requestFullscreen().catch(() => {});
+    if (fullscreenElement()) {
+      exitPageFullscreen();
+      return;
+    }
+    if (canElementFullscreen) {
+      enterPageFullscreen();
+      return;
+    }
+    (videoEl as (HTMLVideoElement & { webkitEnterFullscreen?: () => void }) | undefined)
+      ?.webkitEnterFullscreen?.();
   }
 
   // --- Gestures ---
