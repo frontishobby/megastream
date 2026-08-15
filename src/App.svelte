@@ -4,6 +4,7 @@
   import FileCard from './lib/components/FileCard.svelte';
   import FolderTree from './lib/components/FolderTree.svelte';
   import VideoView from './lib/components/VideoView.svelte';
+  import ShortsPlayer from './lib/components/ShortsPlayer.svelte';
   import LoginScreen from './lib/components/LoginScreen.svelte';
   import { MegaService, type MegaNode } from './lib/mega';
   import {
@@ -20,7 +21,7 @@
   import { generateStrips } from './lib/strips';
   import { generateScenes } from './lib/scenes';
   import { resolveSceneAnalysisMode } from './lib/labeler';
-  import { Loader2, AlertCircle, Upload, FolderPlus, Folder, ImagePlus, Film } from '@lucide/svelte';
+  import { Loader2, AlertCircle, Upload, FolderPlus, Folder, ImagePlus, Film, Shuffle, ListVideo } from '@lucide/svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import './app.css';
 
@@ -66,6 +67,13 @@
     const root = s.root as unknown as MegaFile;
     const r = router.current;
     if (r.kind === 'home') return root;
+    if (r.kind === 'shorts') {
+      // Keep the folder listing behind the shorts overlay sensible.
+      const f = r.folderId
+        ? (s as unknown as { files: Record<string, MegaFile> }).files[r.folderId]
+        : undefined;
+      return f?.directory ? f : root;
+    }
     const lookup = (s as unknown as { files: Record<string, MegaFile> }).files[r.id];
     if (!lookup) return root;
     if (r.kind === 'file') return lookup.parent ?? root;
@@ -290,7 +298,10 @@
   // element crossed, so a plain flag flickers off mid-drag.
   let dragDepth = $state(0);
   const dropTargetActive = $derived(
-    dragDepth > 0 && !!currentFolder && router.current.kind !== 'file'
+    dragDepth > 0 &&
+      !!currentFolder &&
+      router.current.kind !== 'file' &&
+      router.current.kind !== 'shorts'
   );
 
   function dragHasFiles(e: DragEvent): boolean {
@@ -465,6 +476,25 @@
           <div class="flex justify-end mb-4 gap-2">
             <button
               type="button"
+              onclick={() => navigate({ kind: 'shorts', scope: 'all' })}
+              class="inline-flex items-center gap-2 bg-gray-800 hover:bg-gray-700 text-gray-100 text-sm font-medium px-4 py-2 rounded-full transition-colors"
+            >
+              <Shuffle size={16} />
+              <span>Random shorts</span>
+            </button>
+            <button
+              type="button"
+              onclick={() =>
+                currentFolderId &&
+                navigate({ kind: 'shorts', scope: 'folder', folderId: currentFolderId })}
+              disabled={!currentFolderId || videoNodes.length === 0}
+              class="inline-flex items-center gap-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 text-sm font-medium px-4 py-2 rounded-full transition-colors"
+            >
+              <ListVideo size={16} />
+              <span>Folder shorts</span>
+            </button>
+            <button
+              type="button"
               onclick={handleGenerateScenes}
               disabled={!currentFolder || !!sceneGen || videoNodes.length === 0}
               class="inline-flex items-center gap-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 text-sm font-medium px-4 py-2 rounded-full transition-colors"
@@ -580,6 +610,15 @@
           {/if}
         </main>
       </div>
+    {/if}
+
+    {#if router.current.kind === 'shorts'}
+      <ShortsPlayer
+        {storage}
+        scope={router.current.scope}
+        folderId={router.current.folderId}
+        onExit={handleBack}
+      />
     {/if}
 
     {#if dropTargetActive}

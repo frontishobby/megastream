@@ -1,13 +1,17 @@
 export type Route =
   | { kind: 'home' }
   | { kind: 'file'; id: string }
-  | { kind: 'folder'; id: string };
+  | { kind: 'folder'; id: string }
+  | { kind: 'shorts'; scope: 'all' | 'folder'; folderId?: string };
 
 function parse(hash: string): Route {
   let m = hash.match(/^#\/file\/(.+)$/);
   if (m) return { kind: 'file', id: decodeURIComponent(m[1]) };
   m = hash.match(/^#\/folder\/(.+)$/);
   if (m) return { kind: 'folder', id: decodeURIComponent(m[1]) };
+  m = hash.match(/^#\/shorts\/folder\/(.+)$/);
+  if (m) return { kind: 'shorts', scope: 'folder', folderId: decodeURIComponent(m[1]) };
+  if (hash === '#/shorts/all') return { kind: 'shorts', scope: 'all' };
   return { kind: 'home' };
 }
 
@@ -33,8 +37,16 @@ export function navigate(r: Route) {
     }
     return;
   }
-  const prefix = r.kind === 'file' ? '#/file/' : '#/folder/';
-  const next = `${prefix}${encodeURIComponent(r.id)}`;
+  let next: string;
+  if (r.kind === 'shorts') {
+    next =
+      r.scope === 'folder' && r.folderId
+        ? `#/shorts/folder/${encodeURIComponent(r.folderId)}`
+        : '#/shorts/all';
+  } else {
+    const prefix = r.kind === 'file' ? '#/file/' : '#/folder/';
+    next = `${prefix}${encodeURIComponent(r.id)}`;
+  }
   if (location.hash !== next) {
     location.hash = next;
   }
