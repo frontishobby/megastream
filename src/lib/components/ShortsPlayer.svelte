@@ -544,20 +544,30 @@
   function onKeyDown(e: KeyboardEvent) {
     switch (e.key) {
       case 'ArrowRight':
+      case 'd':
         e.preventDefault();
         advanceForward();
         break;
       case 'ArrowLeft':
+      case 'a':
         e.preventDefault();
         goBack();
         break;
       case 'ArrowDown':
+      case 's':
         e.preventDefault();
         nextScene();
         break;
       case 'ArrowUp':
+      case 'w':
         e.preventDefault();
         prevScene();
+        break;
+      case 'z':
+        skipBy(-SKIP_SECONDS);
+        break;
+      case 'x':
+        skipBy(SKIP_SECONDS);
         break;
       case ' ':
         e.preventDefault();
