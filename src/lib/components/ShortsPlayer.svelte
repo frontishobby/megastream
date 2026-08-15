@@ -32,27 +32,105 @@
     node: MegaNode;
     scenes: Scene[];
     sceneIndex: number;
+    poster?: string | null;
   }
 
   let pool = $state<MegaNode[]>([]);
   let history = $state<ShortsEntry[]>([]);
   let cursor = $state(-1);
   const current = $derived(history[cursor] ?? null);
+  const prevEntry = $derived(cursor > 0 ? history[cursor - 1] : null);
+  const redoEntry = $derived(
+    cursor >= 0 && cursor < history.length - 1 ? history[cursor + 1] : null
+  );
 
-  let streamUrl = $state<string | null>(null);
-  let poster = $state<string | null>(null);
-  let loading = $state(true);
   let paused = $state(false);
   let muted = $state(false);
   let fullscreen = $state(false);
-  let videoEl = $state<HTMLVideoElement | undefined>();
 
   let navLock = false;
   let disposed = false;
   let consecutiveErrors = 0;
 
+  // --- Two media slots: the active one plays, the standby one preloads the
+  // next random pick (2 connections, paused at its scene start) so a forward
+  // swipe can slide an already-buffered video in. ---
+  interface Slot {
+    entry: ShortsEntry | null;
+    url: string | null;
+    loading: boolean;
+    hasFrame: boolean;
+    gen: number;
+  }
+
+  function emptySlot(): Slot {
+    return { entry: null, url: null, loading: false, hasFrame: false, gen: 0 };
+  }
+
+  let slots = $state<[Slot, Slot]>([emptySlot(), emptySlot()]);
+  let active = $state(0);
+  let slotEls = $state<(HTMLVideoElement | undefined)[]>([undefined, undefined]);
+  const slotCleanups: (null | (() => void))[] = [null, null];
+
+  const videoEl = $derived(slotEls[active]);
+  const activeLoading = $derived(!slots[active].url || slots[active].loading);
+  const standbyIdx = $derived(1 - active);
+
+  function cleanupSlotStream(i: number) {
+    slotCleanups[i]?.();
+    slotCleanups[i] = null;
+    slots[i].url = null;
+    slots[i].hasFrame = false;
+  }
+
+  function clearSlot(i: number) {
+    slots[i].gen++;
+    cleanupSlotStream(i);
+    slots[i].entry = null;
+    slots[i].loading = false;
+  }
+
+  async function loadSlot(i: number, entry: ShortsEntry, opts: { preload: boolean }) {
+    const gen = ++slots[i].gen;
+    cleanupSlotStream(i);
+    slots[i].entry = entry;
+    slots[i].loading = true;
+    const tracked = slots[i].entry!;
+    if (tracked.poster === undefined) {
+      tracked.poster = null;
+      getStoredThumbnail(tracked.node.id, tracked.node.node).then((p) => {
+        if (p) tracked.poster = p;
+      });
+    }
+    try {
+      // Preloads use fewer connections so they never starve the live stream
+      // (MEGA throttles parallel connections; same pattern as downloads).
+      const { url, cleanup } = await createStreamUrl(entry.node.node, {
+        maxConnections: opts.preload ? 2 : 4,
+      });
+      if (slots[i].gen !== gen || disposed) {
+        cleanup();
+        return;
+      }
+      slotCleanups[i] = cleanup;
+      slots[i].url = url;
+      slots[i].loading = false;
+    } catch (err) {
+      if (slots[i].gen !== gen || disposed) return;
+      slots[i].loading = false;
+      if (opts.preload) {
+        clearSlot(i);
+      } else {
+        showStreamErrorToast('Shorts stream failed', err);
+        failAdvance();
+      }
+    }
+  }
+
   $effect(() => () => {
     disposed = true;
+    clearSlot(0);
+    clearSlot(1);
     clearTimeout(pendingTapTimer);
     clearTimeout(skipFlashTimer);
   });
@@ -75,6 +153,8 @@
     untrack(() => {
       history = [];
       cursor = -1;
+      clearSlot(0);
+      clearSlot(1);
       pool = p;
       advanceForward();
     });
@@ -89,48 +169,169 @@
     return () => sceneEvents.removeEventListener('scenes', onScenes);
   });
 
-  // --- Navigation ---
+  // --- Random picking ---
   function recentIds(): string[] {
     const ids: string[] = [];
-    for (let i = cursor; i >= 0 && ids.length < 5; i--) {
+    const standbyId = slots[standbyIdx].entry?.node.id;
+    if (standbyId) ids.push(standbyId);
+    for (let i = cursor; i >= 0 && ids.length < 6; i--) {
       const id = history[i]?.node.id;
       if (id && !ids.includes(id)) ids.push(id);
     }
     return ids;
   }
 
+  async function pickEntry(): Promise<ShortsEntry | null> {
+    while (pool.length > 0) {
+      const video = pickRandomVideo(pool, recentIds());
+      if (!video) break;
+      const data = await getStoredScenes(video.id, video.node);
+      if (disposed) return null;
+      if (!data || data.scenes.length === 0) {
+        // Sidecar listed but unreadable/empty — drop it and re-pick.
+        pool = pool.filter((v) => v.id !== video.id);
+        continue;
+      }
+      return {
+        node: video,
+        scenes: data.scenes,
+        sceneIndex: Math.floor(Math.random() * data.scenes.length),
+      };
+    }
+    showToast('No videos with scene data left', 'warning');
+    onExit();
+    return null;
+  }
+
+  let prefetchLock = false;
+
+  async function ensurePrefetch() {
+    if (disposed || prefetchLock) return;
+    if (cursor !== history.length - 1) return; // only prefetch at the head
+    if (slots[standbyIdx].entry) return;
+    prefetchLock = true;
+    try {
+      const entry = await pickEntry();
+      if (!entry || disposed) return;
+      if (cursor !== history.length - 1 || slots[standbyIdx].entry) return;
+      loadSlot(standbyIdx, entry, { preload: true });
+    } finally {
+      prefetchLock = false;
+    }
+  }
+
+  // --- Slide animation ---
+  const SLIDE_MS = 300;
+  let offsetX = $state(0);
+  let animating = $state<null | 'forward' | 'back'>(null);
+  let resetting = $state(false);
+
+  function runSlide(dir: 'forward' | 'back'): Promise<void> {
+    return new Promise((resolve) => {
+      animating = dir;
+      offsetX = (dir === 'forward' ? -1 : 1) * window.innerWidth;
+      setTimeout(resolve, SLIDE_MS);
+    });
+  }
+
+  function finishSlide() {
+    resetting = true;
+    animating = null;
+    offsetX = 0;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        resetting = false;
+      });
+    });
+  }
+
+  function playActive() {
+    const el = slotEls[active];
+    if (!el || !slots[active].entry) return;
+    consecutiveErrors = 0;
+    el.play().catch(() => {
+      paused = true;
+    });
+  }
+
+  function swapActiveToFresh(entry: ShortsEntry) {
+    const old = active;
+    active = 1 - active;
+    loadSlot(active, entry, { preload: false });
+    clearSlot(old);
+    finishSlide();
+  }
+
+  // --- Navigation ---
   async function advanceForward() {
-    if (navLock || disposed) return;
-    if (cursor < history.length - 1) {
-      cursor++;
+    if (navLock || disposed || animating) {
+      offsetX = 0;
       return;
     }
     navLock = true;
     try {
-      while (pool.length > 0) {
-        const video = pickRandomVideo(pool, recentIds());
-        if (!video) break;
-        const data = await getStoredScenes(video.id, video.node);
-        if (disposed) return;
-        if (!data || data.scenes.length === 0) {
-          // Sidecar listed but unreadable/empty — drop it and re-pick.
-          pool = pool.filter((v) => v.id !== video.id);
-          continue;
-        }
-        const sceneIndex = Math.floor(Math.random() * data.scenes.length);
-        history = [...history, { node: video, scenes: data.scenes, sceneIndex }];
-        cursor = history.length - 1;
+      if (cursor === -1) {
+        // Very first entry — no animation.
+        const entry = await pickEntry();
+        if (!entry) return;
+        history = [entry];
+        cursor = 0;
+        loadSlot(active, entry, { preload: false });
         return;
       }
-      showToast('No videos with scene data left', 'warning');
-      onExit();
+      if (redoEntry) {
+        // Forward through existing history — poster slides in, fresh stream.
+        await runSlide('forward');
+        cursor++;
+        swapActiveToFresh(history[cursor]);
+        return;
+      }
+      const sIdx = standbyIdx;
+      if (slots[sIdx].entry && slots[sIdx].url) {
+        // Preloaded next — slide it in and keep its (already-buffering) stream.
+        await runSlide('forward');
+        const entry = slots[sIdx].entry!;
+        history = [...history, entry];
+        cursor = history.length - 1;
+        const old = active;
+        active = sIdx;
+        clearSlot(old);
+        finishSlide();
+        playActive();
+        ensurePrefetch();
+        return;
+      }
+      // Prefetch not ready (rapid swipes / startup) — slide to an empty panel,
+      // then pick and load into it.
+      await runSlide('forward');
+      const old = active;
+      active = 1 - active;
+      clearSlot(active);
+      clearSlot(old);
+      finishSlide();
+      const entry = await pickEntry();
+      if (!entry) return;
+      history = [...history, entry];
+      cursor = history.length - 1;
+      loadSlot(active, entry, { preload: false });
     } finally {
       navLock = false;
     }
   }
 
-  function goBack() {
-    if (cursor > 0) cursor--;
+  async function goBack() {
+    if (navLock || disposed || animating || cursor <= 0) {
+      offsetX = 0;
+      return;
+    }
+    navLock = true;
+    try {
+      await runSlide('back');
+      cursor--;
+      swapActiveToFresh(history[cursor]);
+    } finally {
+      navLock = false;
+    }
   }
 
   function seekScene(i: number) {
@@ -163,59 +364,35 @@
     }, 1200);
   }
 
-  // --- Stream lifecycle: exactly one live session, cleaned up on advance ---
-  $effect(() => {
-    const entry = current;
-    if (!entry) return;
-    const id = entry.node.id;
-    const file = entry.node.node;
-    let cancelled = false;
-    let cleanupFn: (() => void) | null = null;
-    loading = true;
-    streamUrl = null;
-    poster = null;
-    paused = false;
-    getStoredThumbnail(id, file).then((p) => {
-      if (!cancelled && p) poster = p;
-    });
-    createStreamUrl(file)
-      .then(({ url, cleanup }) => {
-        if (cancelled) {
-          cleanup();
-          return;
-        }
-        cleanupFn = cleanup;
-        streamUrl = url;
-        loading = false;
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        loading = false;
-        showStreamErrorToast('Shorts stream failed', err);
-        failAdvance();
-      });
-    return () => {
-      cancelled = true;
-      cleanupFn?.();
-    };
-  });
-
-  function onLoadedMetadata() {
-    consecutiveErrors = 0;
-    const entry = current;
-    if (!videoEl || !entry) return;
+  // --- Slot <video> events ---
+  function onSlotMetadata(i: number) {
+    const el = slotEls[i];
+    const entry = slots[i].entry;
+    if (!el || !entry) return;
     const scene = entry.scenes[entry.sceneIndex];
-    if (scene && scene.start > 0.1) videoEl.currentTime = scene.start;
-    videoEl.play().catch(() => {
-      paused = true;
-    });
+    if (scene && scene.start > 0.1) el.currentTime = scene.start;
+    if (i === active) {
+      consecutiveErrors = 0;
+      el.play().catch(() => {
+        paused = true;
+      });
+      ensurePrefetch();
+    } else {
+      el.pause();
+    }
   }
 
-  function onVideoError() {
-    const e = videoEl?.error;
+  function onSlotError(i: number) {
+    const el = slotEls[i];
+    const e = el?.error;
     if (!e) return;
     // src teardown during cleanup fires a spurious "empty src" error
-    if (e.code === 4 && !videoEl?.currentSrc) return;
+    if (e.code === 4 && !el?.currentSrc) return;
+    if (i !== active) {
+      // Broken preload — drop it so the next advance picks fresh.
+      clearSlot(i);
+      return;
+    }
     const codes: Record<number, string> = {
       1: 'playback aborted',
       2: 'network error while streaming',
@@ -300,10 +477,9 @@
   const TAP_MAX_MS = 300;
 
   let gesture = $state<{ id: number; x: number; y: number; t: number } | null>(null);
-  let dragX = $state(0);
 
   function onPointerDown(e: PointerEvent) {
-    if (gesture) return;
+    if (gesture || animating) return;
     gesture = { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now() };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     wakeControls();
@@ -313,7 +489,12 @@
     if (!gesture || e.pointerId !== gesture.id) return;
     const dx = e.clientX - gesture.x;
     const dy = e.clientY - gesture.y;
-    dragX = Math.abs(dx) > Math.abs(dy) ? dx : 0;
+    if (Math.abs(dx) > Math.abs(dy)) {
+      // Rubber-band when there's nothing to go back to.
+      offsetX = dx > 0 && cursor <= 0 ? dx * 0.25 : dx;
+    } else {
+      offsetX = 0;
+    }
   }
 
   function onPointerUp(e: PointerEvent) {
@@ -322,14 +503,13 @@
     const dy = e.clientY - gesture.y;
     const dt = performance.now() - gesture.t;
     gesture = null;
-    dragX = 0;
     resolveGesture(dx, dy, dt, e.clientX);
   }
 
   function onPointerCancel(e: PointerEvent) {
     if (gesture && e.pointerId === gesture.id) {
       gesture = null;
-      dragX = 0;
+      offsetX = 0;
     }
   }
 
@@ -340,14 +520,21 @@
     const ax = Math.abs(dx);
     const ay = Math.abs(dy);
     if (ax < TAP_MAX_DIST && ay < TAP_MAX_DIST) {
+      offsetX = 0;
       if (dt < TAP_MAX_MS) handleTap(x);
       return;
     }
     if (ax >= ay) {
-      if (ax < SWIPE_THRESHOLD) return;
+      if (ax < SWIPE_THRESHOLD) {
+        offsetX = 0;
+        return;
+      }
+      // advanceForward/goBack animate from the current drag offset, or snap
+      // the panels back themselves when they can't run.
       if (dx < 0) advanceForward();
       else goBack();
     } else {
+      offsetX = 0;
       if (ay < SWIPE_THRESHOLD) return;
       if (dy < 0) nextScene();
       else prevScene();
@@ -412,6 +599,10 @@
     const s = Math.floor(sec % 60);
     return `${m}:${s.toString().padStart(2, '0')}`;
   }
+
+  const panelTransition = $derived(
+    gesture || resetting ? '' : 'transition-transform duration-300 ease-out'
+  );
 </script>
 
 <svelte:window onkeydown={onKeyDown} />
@@ -420,32 +611,77 @@
   class="fixed inset-0 z-50 bg-black text-gray-100 overflow-hidden select-none"
   style="touch-action: none; overscroll-behavior: contain;"
 >
-  <!-- Media layer (follows the drag slightly for feedback) -->
-  <div
-    class="absolute inset-0 {gesture ? '' : 'transition-transform duration-150 ease-out'}"
-    style:transform="translateX({dragX * 0.35}px)"
-  >
-    {#if poster && !streamUrl}
-      <img src={poster} alt="" class="absolute inset-0 w-full h-full object-contain opacity-50" />
-    {/if}
-    {#if streamUrl}
-      <video
-        bind:this={videoEl}
-        src={streamUrl}
-        autoplay
-        playsinline
-        {muted}
-        onloadedmetadata={onLoadedMetadata}
-        onended={advanceForward}
-        onerror={onVideoError}
-        onplay={() => (paused = false)}
-        onpause={() => (paused = true)}
-        class="absolute inset-0 w-full h-full object-contain"
-      >
-        <track kind="captions" />
-      </video>
-    {/if}
-  </div>
+  <!-- Previous entry peeking in from the left on a back drag -->
+  {#if prevEntry}
+    <div
+      class="absolute inset-0 {panelTransition}"
+      style:transform="translateX(calc(-100% + {offsetX}px))"
+    >
+      {#if prevEntry.poster}
+        <img src={prevEntry.poster} alt="" class="absolute inset-0 w-full h-full object-contain" />
+      {/if}
+    </div>
+  {/if}
+
+  <!-- Media slots: the active one plays at offsetX, the standby one holds the
+       preloaded next pick just offscreen to the right -->
+  {#each [0, 1] as i (i)}
+    <div
+      class="absolute inset-0 {panelTransition}"
+      style:transform={i === active
+        ? `translateX(${offsetX}px)`
+        : `translateX(calc(100% + ${offsetX}px))`}
+    >
+      {#if slots[i].entry?.poster && !slots[i].hasFrame}
+        <img
+          src={slots[i].entry?.poster}
+          alt=""
+          class="absolute inset-0 w-full h-full object-contain {slots[i].url ? '' : 'opacity-50'}"
+        />
+      {/if}
+      {#if slots[i].url}
+        <video
+          bind:this={slotEls[i]}
+          src={slots[i].url}
+          autoplay={i === active}
+          playsinline
+          preload="auto"
+          muted={i === active ? muted : true}
+          onloadedmetadata={() => onSlotMetadata(i)}
+          onloadeddata={() => (slots[i].hasFrame = true)}
+          onended={() => i === active && advanceForward()}
+          onerror={() => onSlotError(i)}
+          onplay={() => i === active && (paused = false)}
+          onpause={() => i === active && (paused = true)}
+          class="absolute inset-0 w-full h-full object-contain"
+        >
+          <track kind="captions" />
+        </video>
+      {/if}
+      {#if i !== active && slots[i].loading}
+        <div class="absolute inset-0 flex items-center justify-center">
+          <div class="w-8 h-8 border-4 border-gray-600 border-t-transparent rounded-full animate-spin"></div>
+        </div>
+      {/if}
+    </div>
+  {/each}
+
+  <!-- Incoming panel on the right when the standby slot has nothing to show:
+       redo through history (poster) or a not-yet-picked fresh entry -->
+  {#if !slots[standbyIdx].entry}
+    <div
+      class="absolute inset-0 {panelTransition}"
+      style:transform="translateX(calc(100% + {offsetX}px))"
+    >
+      {#if redoEntry?.poster}
+        <img src={redoEntry.poster} alt="" class="absolute inset-0 w-full h-full object-contain" />
+      {:else}
+        <div class="absolute inset-0 flex items-center justify-center">
+          <div class="w-8 h-8 border-4 border-gray-600 border-t-transparent rounded-full animate-spin"></div>
+        </div>
+      {/if}
+    </div>
+  {/if}
 
   <!-- Gesture surface -->
   <div
@@ -472,7 +708,7 @@
     </div>
   {/if}
 
-  {#if loading}
+  {#if activeLoading}
     <div class="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
       <div class="w-12 h-12 border-4 border-red-500 border-t-transparent rounded-full animate-spin"></div>
     </div>
