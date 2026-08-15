@@ -53,6 +53,8 @@
 
   $effect(() => () => {
     disposed = true;
+    clearTimeout(pendingTapTimer);
+    clearTimeout(skipFlashTimer);
   });
 
   // --- Pool construction (per scope/folder) ---
@@ -230,6 +232,45 @@
     else videoEl.pause();
   }
 
+  // --- Double-tap seek: left/right half of the screen skips ±10s. A single
+  // tap waits out the double-tap window before toggling play; further taps
+  // within the chain window keep stacking skips (YouTube-style). ---
+  const DOUBLE_TAP_MS = 300;
+  const TAP_CHAIN_MS = 350;
+  const SKIP_SECONDS = 10;
+
+  let pendingTapTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastTapAt = 0;
+  let chainUntil = 0;
+  let skipFlash = $state<{ side: 'left' | 'right'; total: number } | null>(null);
+  let skipFlashTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function handleTap(x: number) {
+    const now = performance.now();
+    const isDouble = now < chainUntil || now - lastTapAt < DOUBLE_TAP_MS;
+    lastTapAt = now;
+    clearTimeout(pendingTapTimer);
+    if (isDouble) {
+      chainUntil = now + TAP_CHAIN_MS;
+      skipBy(x >= window.innerWidth / 2 ? SKIP_SECONDS : -SKIP_SECONDS);
+      return;
+    }
+    pendingTapTimer = setTimeout(() => togglePlay(), DOUBLE_TAP_MS);
+  }
+
+  function skipBy(delta: number) {
+    if (!videoEl) return;
+    const dur = Number.isFinite(videoEl.duration) ? videoEl.duration : Infinity;
+    videoEl.currentTime = Math.max(0, Math.min(dur, videoEl.currentTime + delta));
+    const side = delta > 0 ? 'right' : 'left';
+    skipFlash = {
+      side,
+      total: (skipFlash?.side === side ? skipFlash.total : 0) + Math.abs(delta),
+    };
+    clearTimeout(skipFlashTimer);
+    skipFlashTimer = setTimeout(() => (skipFlash = null), 700);
+  }
+
   // --- Fullscreen / orientation (best-effort; iOS gets the overlay only) ---
   $effect(() => {
     document.documentElement.requestFullscreen?.().catch(() => {});
@@ -282,7 +323,7 @@
     const dt = performance.now() - gesture.t;
     gesture = null;
     dragX = 0;
-    resolveGesture(dx, dy, dt);
+    resolveGesture(dx, dy, dt, e.clientX);
   }
 
   function onPointerCancel(e: PointerEvent) {
@@ -295,11 +336,11 @@
   // The finger moves the content: dragging LEFT advances to the new video
   // sitting "on the right", dragging UP moves down to the next scene — the
   // usual shorts convention. Flip the four calls here if it feels inverted.
-  function resolveGesture(dx: number, dy: number, dt: number) {
+  function resolveGesture(dx: number, dy: number, dt: number, x: number) {
     const ax = Math.abs(dx);
     const ay = Math.abs(dy);
     if (ax < TAP_MAX_DIST && ay < TAP_MAX_DIST) {
-      if (dt < TAP_MAX_MS) togglePlay();
+      if (dt < TAP_MAX_MS) handleTap(x);
       return;
     }
     if (ax >= ay) {
@@ -415,6 +456,21 @@
     onpointerup={onPointerUp}
     onpointercancel={onPointerCancel}
   ></div>
+
+  {#if skipFlash}
+    <div
+      class="absolute inset-y-0 z-10 w-1/3 flex items-center justify-center pointer-events-none {skipFlash.side ===
+      'left'
+        ? 'left-0'
+        : 'right-0'}"
+    >
+      <div class="bg-black/60 rounded-full px-4 py-2 text-sm font-semibold">
+        {skipFlash.side === 'left' ? '«' : ''}
+        {skipFlash.side === 'left' ? '−' : '+'}{skipFlash.total}s
+        {skipFlash.side === 'right' ? '»' : ''}
+      </div>
+    </div>
+  {/if}
 
   {#if loading}
     <div class="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
