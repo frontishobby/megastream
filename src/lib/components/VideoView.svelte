@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowLeft, StickyNote, Pencil, Check, X, Loader2, Film, RefreshCw, Download } from '@lucide/svelte';
+  import { ArrowLeft, StickyNote, Pencil, Check, X, Loader2, Film, RefreshCw, Download, FolderInput, Folder } from '@lucide/svelte';
   import { untrack } from 'svelte';
   import type { MegaNode } from '../mega';
   import { MegaService } from '../mega';
@@ -13,7 +13,8 @@
     type SceneData,
   } from '../scenes';
   import { resolveSceneAnalysisMode } from '../labeler';
-  import type { Storage, MutableFile } from 'megajs';
+  import { THUMB_FOLDER } from '../thumbnails';
+  import type { Storage, MutableFile, File as MegaFile } from 'megajs';
   import { showToast } from '../toast.svelte';
 
   let { node, onBack } = $props<{
@@ -312,6 +313,78 @@
     }
   }
 
+  // --- Move to folder ---
+  interface FolderOption {
+    file: MegaFile;
+    name: string;
+    depth: number;
+    id: string;
+  }
+
+  let movePickerOpen = $state(false);
+  let moving = $state(false);
+  let folderOptions = $state<FolderOption[]>([]);
+
+  function collectFolders(): FolderOption[] {
+    const storage = (node.node as unknown as { storage?: Storage }).storage;
+    const root = storage?.root as unknown as MegaFile | undefined;
+    if (!root) return [];
+    const out: FolderOption[] = [{ file: root, name: 'Root', depth: 0, id: 'root' }];
+    const walk = (folder: MegaFile, depth: number) => {
+      const children = ((folder.children ?? []) as MegaFile[])
+        .filter((c) => c.directory && c.name !== THUMB_FOLDER)
+        .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+      for (const child of children) {
+        out.push({
+          file: child,
+          name: child.name || 'Folder',
+          depth,
+          id: (child as unknown as { nodeId?: string }).nodeId ?? '',
+        });
+        walk(child, depth + 1);
+      }
+    };
+    walk(root, 1);
+    return out;
+  }
+
+  function openMovePicker() {
+    folderOptions = collectFolders();
+    movePickerOpen = true;
+  }
+
+  function closeMovePicker() {
+    if (moving) return;
+    movePickerOpen = false;
+  }
+
+  function isCurrentLocation(option: FolderOption): boolean {
+    return option.file === (node.node as MegaFile).parent;
+  }
+
+  async function moveToFolder(option: FolderOption) {
+    if (moving || isCurrentLocation(option)) return;
+    moving = true;
+    try {
+      await MegaService.moveFile(node.node, option.file);
+      movePickerOpen = false;
+      showToast(`Moved to ${option.name}`);
+    } catch (err) {
+      showToast(
+        `Move failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+    } finally {
+      moving = false;
+    }
+  }
+
+  function movePickerKey(e: KeyboardEvent) {
+    if (e.key === 'Escape' && movePickerOpen) {
+      e.preventDefault();
+      closeMovePicker();
+    }
+  }
+
   let downloadStarting = $state(false);
 
   async function handleDownload() {
@@ -354,6 +427,8 @@
     }
   }
 </script>
+
+<svelte:window onkeydown={movePickerKey} />
 
 <div class="flex-1 w-full max-w-[1920px] mx-auto py-4 md:py-6">
   <button
@@ -527,6 +602,15 @@
           </button>
           <button
             type="button"
+            onclick={openMovePicker}
+            class="text-gray-500 hover:text-gray-200 p-1 rounded shrink-0 opacity-60 group-hover:opacity-100 transition-opacity"
+            title="Move to folder"
+            aria-label="Move to folder"
+          >
+            <FolderInput size={16} />
+          </button>
+          <button
+            type="button"
             onclick={handleDownload}
             disabled={downloadStarting}
             class="text-gray-500 hover:text-gray-200 p-1 rounded shrink-0 opacity-60 group-hover:opacity-100 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
@@ -646,3 +730,62 @@
     </aside>
   </div>
 </div>
+
+{#if movePickerOpen}
+  <div
+    class="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+    onclick={(e) => {
+      if (e.target === e.currentTarget) closeMovePicker();
+    }}
+    role="presentation"
+  >
+    <div
+      class="w-full max-w-md bg-gray-900 border border-gray-800 rounded-xl shadow-2xl flex flex-col max-h-[70vh]"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Move to folder"
+    >
+      <div class="flex items-center justify-between px-4 py-3 border-b border-gray-800">
+        <div class="flex items-center gap-2 text-gray-200 text-sm font-medium">
+          <FolderInput size={16} class="text-blue-400" />
+          <span>Move to folder</span>
+        </div>
+        <button
+          type="button"
+          onclick={closeMovePicker}
+          disabled={moving}
+          class="text-gray-500 hover:text-gray-200 p-1 rounded disabled:opacity-50"
+          aria-label="Close"
+        >
+          <X size={16} />
+        </button>
+      </div>
+      <div class="flex-1 overflow-y-auto p-2">
+        {#each folderOptions as option (option.id)}
+          {@const current = isCurrentLocation(option)}
+          <button
+            type="button"
+            onclick={() => moveToFolder(option)}
+            disabled={moving || current}
+            style="padding-left: {option.depth * 16 + 12}px"
+            class="w-full flex items-center gap-2 py-2 pr-3 rounded-lg text-sm text-left transition-colors {current
+              ? 'text-gray-500 cursor-not-allowed bg-gray-800/40'
+              : 'text-gray-200 hover:bg-gray-800 disabled:opacity-50'}"
+          >
+            <Folder size={15} class={current ? 'text-gray-600 shrink-0' : 'text-blue-400 shrink-0'} />
+            <span class="truncate">{option.name}</span>
+            {#if current}
+              <span class="ml-auto text-[11px] text-gray-600 shrink-0">Current</span>
+            {/if}
+          </button>
+        {/each}
+      </div>
+      {#if moving}
+        <div class="px-4 py-3 border-t border-gray-800 flex items-center gap-2 text-gray-400 text-xs">
+          <Loader2 size={14} class="animate-spin" />
+          <span>Moving…</span>
+        </div>
+      {/if}
+    </div>
+  </div>
+{/if}

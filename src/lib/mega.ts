@@ -70,6 +70,10 @@ export class MegaService {
     return trimmed;
   }
 
+  static async moveFile(file: File, target: File): Promise<void> {
+    await (file as MutableFile).moveTo(target);
+  }
+
   static async deleteFile(file: File): Promise<void> {
     // Non-permanent: moves the node to MEGA's Rubbish Bin so it can be recovered.
     await (file as MutableFile).delete(false);
