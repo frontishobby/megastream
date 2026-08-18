@@ -146,6 +146,26 @@
       : fileNodes.filter((n) => [...selectedTags].every((t) => n.tags?.includes(t)))
   );
 
+  // Global video search (header): case-insensitive substring match on video
+  // names across the whole account, ignoring the hidden thumbnail folders.
+  let searchQuery = $state('');
+  const searchActive = $derived(searchQuery.trim().length > 0);
+  const searchResults = $derived.by<MegaNode[]>(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q || !storage) return [];
+    void nodes; // re-run when the tree changes (uploads, deletes, renames)
+    const results: MegaNode[] = [];
+    const walk = (folder: MegaFile) => {
+      for (const child of MegaService.listChildren(folder)) {
+        if (child.type === 'folder') walk(child.node);
+        else if (MegaService.isVideo(child.name) && child.name.toLowerCase().includes(q))
+          results.push(child);
+      }
+    };
+    walk(storage.root as unknown as MegaFile);
+    return results;
+  });
+
   function toggleTag(tag: string) {
     if (selectedTags.has(tag)) selectedTags.delete(tag);
     else selectedTags.add(tag);
@@ -431,6 +451,8 @@
       path={pathDisplay}
       accountEmail={storage.email || ''}
       {quota}
+      {searchQuery}
+      onSearch={(q: string) => (searchQuery = q)}
       onNavigate={handleNavigate}
       onLogout={handleLogout}
     />
@@ -473,6 +495,21 @@
             </div>
           {/if}
 
+          {#if searchActive}
+            <div class="mb-4 text-sm text-gray-400">
+              {searchResults.length} video{searchResults.length === 1 ? '' : 's'} matching
+              <span class="text-gray-200 font-medium">"{searchQuery.trim()}"</span>
+            </div>
+            {#if searchResults.length > 0}
+              <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                {#each searchResults as node (node.id)}
+                  <FileCard {node} onSelect={handleSelect} onDeleted={handleDeleted} />
+                {/each}
+              </div>
+            {:else}
+              <div class="text-center py-20 text-gray-500">No videos match your search.</div>
+            {/if}
+          {:else}
           <div class="flex flex-wrap justify-end mb-4 gap-2">
             <button
               type="button"
@@ -607,6 +644,7 @@
             </div>
           {:else}
             <div class="text-center py-20 text-gray-500">This folder is empty.</div>
+          {/if}
           {/if}
         </main>
       </div>
