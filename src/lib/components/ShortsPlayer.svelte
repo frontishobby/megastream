@@ -613,6 +613,9 @@
       case 'm':
         muted = !muted;
         break;
+      case 'e':
+        deleteCurrent();
+        break;
       case 'f':
         toggleFullscreen();
         break;
@@ -804,7 +807,7 @@
       disabled={!current || deleting}
       class="shrink-0 p-2 rounded-full bg-black/40 hover:bg-red-600/80 disabled:opacity-40 transition-colors"
       aria-label="Delete video"
-      title="Delete video (moves to Rubbish Bin)"
+      title="Delete video (e) — moves to Rubbish Bin"
     >
       {#if deleting}<Loader2 size={18} class="animate-spin" />{:else}<Trash2 size={18} />{/if}
     </button>
