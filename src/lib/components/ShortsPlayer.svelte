@@ -635,9 +635,11 @@
   const hudVisible = $derived(controlsVisible || paused);
 
   $effect(() => {
-    // Also restarts the fade timer on resume, so the HUD doesn't vanish
-    // the instant playback continues after a pause.
+    // Re-show the HUD for a moment whenever the video or scene changes (auto
+    // advance included) and on pause/resume, so the title/scene info registers.
     void paused;
+    void current?.node.id;
+    void current?.sceneIndex;
     wakeControls();
     return () => clearTimeout(hideTimer);
   });
