@@ -479,14 +479,16 @@
     skipFlashTimer = setTimeout(() => (skipFlash = null), 700);
   }
 
-  // --- Fullscreen / orientation (best-effort; iOS gets the overlay only) ---
+  // --- Fullscreen / orientation (user-initiated via the button or `f`;
+  // landscape lock is best-effort and only possible while fullscreen) ---
   $effect(() => {
-    document.documentElement.requestFullscreen?.().catch(() => {});
-    (screen.orientation as unknown as { lock?: (o: string) => Promise<void> })
-      ?.lock?.('landscape')
-      .catch(() => {});
     const onFs = () => {
       fullscreen = !!document.fullscreenElement;
+      if (document.fullscreenElement) {
+        (screen.orientation as unknown as { lock?: (o: string) => Promise<void> })
+          ?.lock?.('landscape')
+          .catch(() => {});
+      }
     };
     onFs();
     document.addEventListener('fullscreenchange', onFs);
@@ -618,7 +620,7 @@
     wakeControls();
   }
 
-  // --- Auto-fading controls ---
+  // --- Auto-fading controls (mouse movement wakes them; pause pins them) ---
   let controlsVisible = $state(true);
   let hideTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -630,7 +632,12 @@
     }, 2500);
   }
 
+  const hudVisible = $derived(controlsVisible || paused);
+
   $effect(() => {
+    // Also restarts the fade timer on resume, so the HUD doesn't vanish
+    // the instant playback continues after a pause.
+    void paused;
     wakeControls();
     return () => clearTimeout(hideTimer);
   });
@@ -651,6 +658,8 @@
 <div
   class="fixed inset-0 z-50 bg-black text-gray-100 overflow-hidden select-none"
   style="touch-action: none; overscroll-behavior: contain;"
+  role="presentation"
+  onmousemove={wakeControls}
 >
   <!-- Previous entry peeking in from the left on a back drag -->
   {#if prevEntry}
@@ -763,7 +772,7 @@
 
   <!-- HUD -->
   <div
-    class="absolute inset-x-0 top-0 z-20 p-4 bg-gradient-to-b from-black/70 to-transparent flex items-start gap-3 transition-opacity duration-300 {controlsVisible
+    class="absolute inset-x-0 top-0 z-20 p-4 bg-gradient-to-b from-black/70 to-transparent flex items-start gap-3 transition-opacity duration-300 {hudVisible
       ? 'opacity-100'
       : 'opacity-0 pointer-events-none'}"
   >
@@ -825,7 +834,7 @@
 
   <!-- Nav fallback buttons (desktop / no-gesture) -->
   <div
-    class="absolute right-3 top-1/2 -translate-y-1/2 z-20 flex flex-col gap-2 transition-opacity duration-300 {controlsVisible
+    class="absolute right-3 top-1/2 -translate-y-1/2 z-20 flex flex-col gap-2 transition-opacity duration-300 {hudVisible
       ? 'opacity-100'
       : 'opacity-0 pointer-events-none'}"
   >
