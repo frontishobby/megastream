@@ -28,6 +28,10 @@
       .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''))
   );
 
+  const fileCount = $derived(
+    ((node.children ?? []) as MegaFile[]).filter((c) => !c.directory).length
+  );
+
   const label = $derived(isRoot ? 'Root' : node.name || 'Folder');
   // Root is always open; other folders track the shared expanded set.
   const isOpen = $derived(isRoot || (!!id && expanded.has(id)));
@@ -92,7 +96,17 @@
     <Folder size={16} class={isSelected ? 'text-red-300' : 'text-blue-400'} />
   {/if}
 
-  <span class="truncate">{label}</span>
+  <span class="flex-1 truncate">{label}</span>
+
+  {#if fileCount > 0}
+    <span
+      class="shrink-0 pl-1 text-[11px] tabular-nums {isSelected
+        ? 'text-red-200/80'
+        : 'text-gray-500'}"
+    >
+      {fileCount}
+    </span>
+  {/if}
 </div>
 
 {#if isOpen && hasChildren}

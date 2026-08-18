@@ -11,10 +11,12 @@
     ChevronDown,
     Play,
     Shuffle,
+    Trash2,
+    Loader2,
   } from '@lucide/svelte';
   import { untrack } from 'svelte';
   import type { Storage } from 'megajs';
-  import type { MegaNode } from '../mega';
+  import { MegaService, type MegaNode } from '../mega';
   import { getStoredScenes, sceneEvents, type Scene } from '../scenes';
   import { createStreamUrl } from '../stream';
   import { getStoredThumbnail } from '../thumbnails';
@@ -350,6 +352,35 @@
 
   function prevScene() {
     if (current) seekScene(current.sceneIndex - 1);
+  }
+
+  // --- Delete current video (to MEGA's Rubbish Bin) then advance ---
+  let deleting = $state(false);
+
+  async function deleteCurrent() {
+    const entry = current;
+    if (!entry || deleting || navLock || animating) return;
+    deleting = true;
+    try {
+      await MegaService.deleteFile(entry.node.node);
+    } catch (err) {
+      if (!disposed) {
+        showToast(err instanceof Error ? err.message : 'Failed to delete video');
+        deleting = false;
+      }
+      return;
+    }
+    if (disposed) return;
+    const id = entry.node.id;
+    pool = pool.filter((v) => v.id !== id);
+    if (slots[standbyIdx].entry?.node.id === id) clearSlot(standbyIdx);
+    // Drop the deleted video from history (redo entries included) and step back
+    // one position so advanceForward slides the next video in.
+    history = history.slice(0, cursor).filter((h) => h.node.id !== id);
+    cursor = history.length - 1;
+    deleting = false;
+    showToast(`Moved to Rubbish Bin: ${entry.node.name}`, 'warning', 4000);
+    advanceForward();
   }
 
   function failAdvance() {
@@ -756,6 +787,16 @@
         </p>
       {/if}
     </div>
+    <button
+      type="button"
+      onclick={deleteCurrent}
+      disabled={!current || deleting}
+      class="shrink-0 p-2 rounded-full bg-black/40 hover:bg-red-600/80 disabled:opacity-40 transition-colors"
+      aria-label="Delete video"
+      title="Delete video (moves to Rubbish Bin)"
+    >
+      {#if deleting}<Loader2 size={18} class="animate-spin" />{:else}<Trash2 size={18} />{/if}
+    </button>
     <button
       type="button"
       onclick={() => (muted = !muted)}
