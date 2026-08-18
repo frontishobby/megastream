@@ -10,6 +10,7 @@
     isRoot = false,
     currentId,
     expanded,
+    version = 0,
     onSelect,
   } = $props<{
     node: MegaFile;
@@ -17,22 +18,29 @@
     isRoot?: boolean;
     currentId: string | null;
     expanded: Set<string>;
+    /** Bumped by the parent when the (non-reactive) mega tree changes. */
+    version?: number;
     onSelect: (node: MegaFile, isRoot: boolean) => void;
   }>();
 
   const id = $derived((node as unknown as { nodeId?: string }).nodeId);
 
-  const childFolders = $derived(
-    ((node.children ?? []) as MegaFile[])
+  const childFolders = $derived.by(() => {
+    void version;
+    return ((node.children ?? []) as MegaFile[])
       .filter((c) => c.directory && c.name !== THUMB_FOLDER)
-      .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''))
-  );
+      .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+  });
 
-  const fileCount = $derived(
-    ((node.children ?? []) as MegaFile[]).filter((c) => !c.directory).length
-  );
+  const fileCount = $derived.by(() => {
+    void version;
+    return ((node.children ?? []) as MegaFile[]).filter((c) => !c.directory).length;
+  });
 
-  const label = $derived(isRoot ? 'Root' : node.name || 'Folder');
+  const label = $derived.by(() => {
+    void version;
+    return isRoot ? 'Root' : node.name || 'Folder';
+  });
   // Root is always open; other folders track the shared expanded set.
   const isOpen = $derived(isRoot || (!!id && expanded.has(id)));
   const isSelected = $derived(isRoot ? currentId === null : currentId === id);
@@ -112,7 +120,7 @@
 {#if isOpen && hasChildren}
   <div role="group">
     {#each childFolders as child (child.nodeId)}
-      <FolderTree node={child} depth={depth + 1} {currentId} {expanded} {onSelect} />
+      <FolderTree node={child} depth={depth + 1} {currentId} {expanded} {version} {onSelect} />
     {/each}
   </div>
 {/if}

@@ -21,7 +21,7 @@
   import { generateStrips } from './lib/strips';
   import { generateScenes } from './lib/scenes';
   import { resolveSceneAnalysisMode } from './lib/labeler';
-  import { Loader2, AlertCircle, Upload, FolderPlus, Folder, ImagePlus, Film, Shuffle, ListVideo } from '@lucide/svelte';
+  import { Loader2, AlertCircle, Upload, FolderPlus, Folder, ImagePlus, Film, Shuffle, ListVideo, Pencil, Trash2 } from '@lucide/svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import './app.css';
 
@@ -213,6 +213,7 @@
   }
 
   function onNodeAdded(added: MegaFile) {
+    treeVersion++;
     if (!currentFolder) return;
     if (added.parent === currentFolder) {
       nodes = MegaService.listChildren(currentFolder);
@@ -276,6 +277,64 @@
       error = err instanceof Error ? err.message : String(err);
     } finally {
       sceneGen = null;
+    }
+  }
+
+  // The mega tree is plain (non-reactive) objects, so structural changes made
+  // outside the 'add' listener need an explicit nudge for the sidebar tree.
+  let treeVersion = $state(0);
+
+  let renamingFolder = $state(false);
+  let deletingFolder = $state(false);
+
+  async function handleRenameFolder() {
+    if (!currentFolder || pathFolders.length < 2 || renamingFolder) return;
+    const target = currentFolder;
+    const name = window.prompt('Rename folder', target.name || '')?.trim();
+    if (!name || name === target.name) return;
+    renamingFolder = true;
+    try {
+      const next = await MegaService.renameFile(target, name);
+      (target as unknown as { name?: string }).name = next;
+      pathFolders = [...pathFolders]; // refresh breadcrumb
+      treeVersion++;
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    } finally {
+      renamingFolder = false;
+    }
+  }
+
+  async function handleDeleteFolder() {
+    if (!currentFolder || pathFolders.length < 2 || deletingFolder) return;
+    const target = currentFolder;
+    const name = target.name || 'Folder';
+    if (
+      !window.confirm(
+        `Delete "${name}" and everything inside it?\n\nIt will be moved to MEGA's Rubbish Bin.`
+      )
+    )
+      return;
+    deletingFolder = true;
+    try {
+      const parent = pathFolders[pathFolders.length - 2];
+      await MegaService.deleteFile(target);
+      // The server event that prunes the local tree can lag; detach the node
+      // now so the parent listing doesn't briefly show the deleted folder.
+      if (parent.children) {
+        (parent as unknown as { children: MegaFile[] }).children = parent.children.filter(
+          (c) => c !== target
+        );
+      }
+      treeVersion++;
+      const pid = (parent as unknown as { nodeId?: string }).nodeId;
+      if (parent === rootFolder || !pid) navigate({ kind: 'home' });
+      else navigate({ kind: 'folder', id: pid });
+      if (storage) refreshQuota(storage);
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    } finally {
+      deletingFolder = false;
     }
   }
 
@@ -401,6 +460,7 @@
 
   function handleDeleted(node: MegaNode) {
     nodes = nodes.filter((n) => n.id !== node.id);
+    treeVersion++;
     if (storage) refreshQuota(storage);
   }
 
@@ -481,6 +541,7 @@
                 isRoot
                 currentId={currentFolderId}
                 expanded={expandedFolders}
+                version={treeVersion}
                 onSelect={handleFolderSelect}
               />
             {/if}
@@ -556,6 +617,29 @@
               {:else}
                 <ImagePlus size={16} />
                 <span>Generate thumbnails</span>
+              {/if}
+            </button>
+            <button
+              type="button"
+              onclick={handleRenameFolder}
+              disabled={pathFolders.length < 2 || renamingFolder}
+              class="inline-flex items-center gap-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 text-sm font-medium px-4 py-2 rounded-full transition-colors"
+            >
+              <Pencil size={16} />
+              <span>Rename folder</span>
+            </button>
+            <button
+              type="button"
+              onclick={handleDeleteFolder}
+              disabled={pathFolders.length < 2 || deletingFolder}
+              class="inline-flex items-center gap-2 bg-gray-800 hover:bg-red-900/40 disabled:opacity-50 disabled:cursor-not-allowed text-red-400 text-sm font-medium px-4 py-2 rounded-full transition-colors"
+            >
+              {#if deletingFolder}
+                <Loader2 size={16} class="animate-spin" />
+                <span>Deleting…</span>
+              {:else}
+                <Trash2 size={16} />
+                <span>Delete folder</span>
               {/if}
             </button>
             <button
