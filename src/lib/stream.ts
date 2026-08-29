@@ -108,13 +108,25 @@ function handleFetchRange(req: FetchRangeMessage, port: MessagePort) {
   let attempts = 0;
   let stream: any = null;
   let retryTimer: number | undefined;
+  let sourcePaused = false;
 
   port.onmessage = (e) => {
-    if (e.data && e.data.type === 'cancel') {
+    const msg = e.data;
+    if (!msg) return;
+    if (msg.type === 'cancel') {
       cancelled = true;
       if (retryTimer !== undefined) clearTimeout(retryTimer);
       try { stream?.destroy?.(); } catch (_) {}
       safeClose(port);
+    } else if (msg.type === 'pause') {
+      // The consumer's queue is full. megajs hands back a Node-style stream,
+      // so pausing stops the MEGA transfer rather than piling the rest of the
+      // window up in the page.
+      sourcePaused = true;
+      try { stream?.pause?.(); } catch (_) {}
+    } else if (msg.type === 'resume') {
+      sourcePaused = false;
+      try { stream?.resume?.(); } catch (_) {}
     }
   };
 
@@ -135,6 +147,12 @@ function handleFetchRange(req: FetchRangeMessage, port: MessagePort) {
     } catch (err: any) {
       fail(err);
       return;
+    }
+
+    // A retry that lands while the consumer is still full must not start
+    // pouring data again.
+    if (sourcePaused) {
+      try { stream.pause?.(); } catch (_) {}
     }
 
     stream.on('data', (chunk: Uint8Array) => {
