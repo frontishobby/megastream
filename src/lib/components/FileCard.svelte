@@ -307,7 +307,7 @@
         class="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity"
       >
         <div class="bg-red-600/90 rounded-full p-3">
-          <Play class="text-white fill-current" size={24} />
+          <Play class="text-white fill-current translate-x-[1px]" size={24} />
         </div>
       </div>
     {:else if isVideo && thumbnailLoading}

@@ -770,7 +770,7 @@
   {:else if paused}
     <div class="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
       <div class="bg-black/50 rounded-full p-5">
-        <Play size={40} class="text-white" fill="currentColor" />
+        <Play size={40} class="text-white translate-x-[2px]" fill="currentColor" />
       </div>
     </div>
   {/if}
