@@ -441,7 +441,8 @@
   }
 
   // --- Double-tap seek: left/right half of the screen skips ±10s. A single
-  // tap waits out the double-tap window before toggling play; further taps
+  // tap waits out the double-tap window; if the HUD was hidden when the tap
+  // started it only reveals the HUD, otherwise it toggles play. Further taps
   // within the chain window keep stacking skips (YouTube-style). ---
   const DOUBLE_TAP_MS = 300;
   const TAP_CHAIN_MS = 350;
@@ -463,7 +464,10 @@
       skipBy(x >= window.innerWidth / 2 ? SKIP_SECONDS : -SKIP_SECONDS);
       return;
     }
-    pendingTapTimer = setTimeout(() => togglePlay(), DOUBLE_TAP_MS);
+    pendingTapTimer = setTimeout(() => {
+      if (hudVisibleAtTapStart) togglePlay();
+      else wakeControls();
+    }, DOUBLE_TAP_MS);
   }
 
   function skipBy(delta: number) {
@@ -511,9 +515,14 @@
 
   let gesture = $state<{ id: number; x: number; y: number; t: number } | null>(null);
 
+  // Sampled before pointerdown wakes the HUD, so a tap on a clean screen
+  // reveals the info overlay first and only a second tap toggles play.
+  let hudVisibleAtTapStart = false;
+
   function onPointerDown(e: PointerEvent) {
     if (gesture || animating) return;
     gesture = { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now() };
+    hudVisibleAtTapStart = hudVisible;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     wakeControls();
   }
