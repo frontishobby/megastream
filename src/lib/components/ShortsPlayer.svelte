@@ -150,6 +150,7 @@
     clearSlot(1);
     clearTimeout(pendingTapTimer);
     clearTimeout(skipFlashTimer);
+    clearTimeout(stallTimer);
   });
 
   // --- Pool construction (per scope/folder) ---
@@ -229,18 +230,21 @@
   // next video is usually ready by the time the user swipes.
   const PREFETCH_BUFFER_AHEAD_S = 6;
 
+  function bufferedEndAt(el: HTMLVideoElement, t: number): number {
+    for (let k = 0; k < el.buffered.length; k++) {
+      if (el.buffered.start(k) <= t && t <= el.buffered.end(k)) {
+        return el.buffered.end(k);
+      }
+    }
+    return 0;
+  }
+
   function maybePrefetch(i: number) {
     if (i !== active || disposed) return;
     const el = slotEls[i];
     if (!el || !slots[i].entry || !slots[i].url) return;
     const t = el.currentTime;
-    let bufferedEnd = 0;
-    for (let k = 0; k < el.buffered.length; k++) {
-      if (el.buffered.start(k) <= t && t <= el.buffered.end(k)) {
-        bufferedEnd = el.buffered.end(k);
-        break;
-      }
-    }
+    const bufferedEnd = bufferedEndAt(el, t);
     const dur = el.duration;
     if (
       bufferedEnd - t >= PREFETCH_BUFFER_AHEAD_S ||
@@ -476,6 +480,47 @@
     };
     showToast(`Shorts playback stopped: ${codes[e.code] ?? 'unknown error'}`);
     failAdvance();
+  }
+
+  // --- Seek-stall watchdog. A double-tap skip is just a seek, but on flaky
+  // wireless links the range request behind it can die silently (network
+  // blip, dropped fetch), leaving the video stuck in 'waiting' forever — the
+  // page-side retries only fire when the stream reports an error. If the
+  // buffer makes no progress for a while after a waiting/seeking event, a
+  // micro re-seek forces the browser to re-issue the request. Capped so a
+  // genuinely slow first chunk isn't restarted into oblivion.
+  const STALL_TIMEOUT_MS = 5000;
+  const STALL_MAX_NUDGES = 3;
+  let stallTimer: ReturnType<typeof setTimeout> | undefined;
+  let stallNudges = 0;
+
+  function armStallWatchdog(i: number) {
+    if (i !== active || disposed) return;
+    clearTimeout(stallTimer);
+    const el = slotEls[i];
+    if (!el) return;
+    const snapshot = bufferedEndAt(el, el.currentTime);
+    stallTimer = setTimeout(() => {
+      const cur = slotEls[active];
+      if (!cur || cur !== el || disposed) return;
+      if (cur.readyState >= 3 || cur.paused || cur.ended) return;
+      if (bufferedEndAt(cur, cur.currentTime) > snapshot) {
+        // Data is flowing, just slow — keep watching without interfering.
+        armStallWatchdog(active);
+        return;
+      }
+      if (stallNudges >= STALL_MAX_NUDGES) return;
+      stallNudges++;
+      try {
+        cur.currentTime = cur.currentTime + 0.001;
+      } catch (_) {}
+      armStallWatchdog(active);
+    }, STALL_TIMEOUT_MS);
+  }
+
+  function clearStallWatchdog() {
+    clearTimeout(stallTimer);
+    stallNudges = 0;
   }
 
   function togglePlay() {
@@ -759,6 +804,10 @@
           onloadeddata={() => (slots[i].hasFrame = true)}
           onprogress={() => maybePrefetch(i)}
           ontimeupdate={() => maybePrefetch(i)}
+          onwaiting={() => armStallWatchdog(i)}
+          onseeking={() => armStallWatchdog(i)}
+          oncanplay={() => i === active && clearStallWatchdog()}
+          onplaying={() => i === active && clearStallWatchdog()}
           onended={() => i === active && advanceForward()}
           onerror={() => onSlotError(i)}
           onplay={() => i === active && (paused = false)}
