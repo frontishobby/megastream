@@ -1,5 +1,11 @@
 import { createStreamUrl, isTransportStream } from './stream';
-import { Semaphore, ensureThumbFolder, findThumbFolder, uploadBytes } from './thumbnails';
+import {
+  Semaphore,
+  ensureThumbFolder,
+  findThumbFolder,
+  saveThumbnailFrame,
+  uploadBytes,
+} from './thumbnails';
 import { classifyFrame } from './labeler';
 import type { Storage, MutableFile } from 'megajs';
 
@@ -39,6 +45,8 @@ export interface SweepSample {
   pos?: Record<string, number>;
   /** general tags (conf >= 0.25) */
   tags?: Record<string, number>;
+  /** framing tags for thumbnail scoring (conf >= 0.05) */
+  th?: Record<string, number>;
 }
 
 export interface SceneData {
@@ -392,9 +400,10 @@ async function runDetection(
 }
 
 const LABEL_FRAME_MAX_W = 512;
-// v4: sidecars now include the raw sample sequence.
-const SWEEP_DETECTOR = 'label-sweep-v4';
+// v5: samples carry framing-tag probs and the sweep picks a thumbnail frame.
+const SWEEP_DETECTOR = 'label-sweep-v5';
 const STORED_TAG_MIN = 0.25;
+const STORED_THUMB_MIN = 0.05;
 
 interface InternalSample {
   t: number;
@@ -402,6 +411,7 @@ interface InternalSample {
   confidence: number | null;
   positions?: Record<string, number>;
   tags?: Record<string, number>;
+  thumb?: Record<string, number>;
 }
 
 function compactSamples(samples: InternalSample[]): SweepSample[] {
@@ -417,8 +427,58 @@ function compactSamples(samples: InternalSample[]): SweepSample[] {
       }
       if (Object.keys(kept).length > 0) out.tags = kept;
     }
+    if (s.thumb) {
+      const kept: Record<string, number> = {};
+      for (const [tag, conf] of Object.entries(s.thumb)) {
+        if (conf >= STORED_THUMB_MIN) kept[tag] = round2(conf);
+      }
+      if (Object.keys(kept).length > 0) out.th = kept;
+    }
     return out;
   });
+}
+
+// Thumbnail frame scoring: reward frames where the performer's face and body
+// are both in view, punish close-ups, backside-only and blurred frames. The
+// probs come from the labeler's `thumb` field (top-k-exempt); a missing tag
+// counts as 0. Weights are free to tune.
+const THUMB_WEIGHTS: Record<string, number> = {
+  looking_at_viewer: 2.0,
+  smile: 0.8,
+  cowboy_shot: 1.5, // mid-thigh-up framing: face + most of the body
+  full_body: 1.2,
+  upper_body: 1.0,
+  portrait: 0.3, // face only — visible, but shows no body
+  '1girl': 0.5,
+  'close-up': -1.5,
+  lower_body: -1.2,
+  from_behind: -1.0,
+  profile: -0.3,
+  head_out_of_frame: -2.0,
+  out_of_frame: -0.5,
+  blurry: -1.0,
+  motion_blur: -0.5,
+};
+
+function thumbScore(probs: Record<string, number>): number {
+  let score = 0;
+  for (const [tag, weight] of Object.entries(THUMB_WEIGHTS)) {
+    score += weight * (probs[tag] ?? 0);
+  }
+  return score;
+}
+
+/** Best thumbnail frame found during a labelled sweep. */
+export interface ThumbFrame {
+  blob: Blob;
+  t: number;
+  score: number;
+}
+
+export interface SceneScanResult {
+  data: SceneData;
+  /** null for static scans and label sweeps where no frame classified. */
+  thumb: ThumbFrame | null;
 }
 // Vote weight of a "none" sample: low enough that close-up/ambiguous blips
 // get absorbed by surrounding labels, high enough that genuinely idle
@@ -540,12 +600,17 @@ async function runLabelSweepSeek(
   video: HTMLVideoElement,
   duration: number,
   opts: SceneDetectOptions
-): Promise<SceneData> {
+): Promise<SceneScanResult> {
   const { labelInterval = 4, minSceneLen = 30, smoothWindow = 7, signal, onProgress } = opts;
 
   const samples: InternalSample[] = [];
   const tasks: Promise<void>[] = [];
   let attempts = 0;
+  // Best face+body frame seen so far; the JPEG blob already exists for
+  // classification, so keeping the winner costs nothing extra. (Wrapped in
+  // an object: assignments inside the classify closures are invisible to
+  // the outer control-flow analysis, which would pin a bare let to null.)
+  const best: { thumb: ThumbFrame | null } = { thumb: null };
 
   // Sample mid-interval (2s, 6s, …) so the first point is a real seek and
   // each frame represents its surrounding interval.
@@ -588,7 +653,14 @@ async function runLabelSweepSeek(
           confidence: label.confidence,
           positions: label.positions,
           tags: label.tags,
+          thumb: label.thumb,
         });
+        // Older servers omit `thumb`; the top-k tags still carry some of the
+        // framing signal, so score with what's there.
+        const score = thumbScore(label.thumb ?? label.tags);
+        if (!best.thumb || score > best.thumb.score) {
+          best.thumb = { blob, t: at, score };
+        }
       })()
     );
     onProgress?.(Math.min(t, duration), duration);
@@ -611,7 +683,12 @@ async function runLabelSweepSeek(
     samples: compactSamples(samples),
   };
   dumpSweepDebug(samples, data);
-  return data;
+  if (best.thumb) {
+    console.log(
+      `[scene-scan] thumb frame @${best.thumb.t.toFixed(1)}s (score ${best.thumb.score.toFixed(2)})`
+    );
+  }
+  return { data, thumb: best.thumb };
 }
 
 /**
@@ -769,7 +846,7 @@ function buildLabeledScenes(
 export async function detectScenesFromFile(
   file: File,
   opts: SceneDetectOptions = {}
-): Promise<SceneData> {
+): Promise<SceneScanResult> {
   await detectSem.acquire();
   const url = URL.createObjectURL(file);
   const video = makeVideo();
@@ -782,7 +859,7 @@ export async function detectScenesFromFile(
     // the whole file through.
     return opts.withLabels
       ? await runLabelSweepSeek(video, duration, opts)
-      : await runDetection(video, duration, opts);
+      : { data: await runDetection(video, duration, opts), thumb: null };
   } finally {
     teardownVideo(video);
     URL.revokeObjectURL(url);
@@ -794,7 +871,7 @@ export async function detectScenesFromFile(
 export async function detectScenesFromNode(
   node: MegaFileLike,
   opts: SceneDetectOptions = {}
-): Promise<SceneData> {
+): Promise<SceneScanResult> {
   await detectSem.acquire();
   try {
     // Fewer connections than playback (4): a scan often runs while the same
@@ -814,7 +891,7 @@ export async function detectScenesFromNode(
       // and keeps the playback pass.
       return opts.withLabels
         ? await runLabelSweepSeek(video, duration, opts)
-        : await runDetection(video, duration, opts);
+        : { data: await runDetection(video, duration, opts), thumb: null };
     } finally {
       teardownVideo(video);
       cleanup();
@@ -977,8 +1054,15 @@ export async function generateScenes(
         continue;
       }
       try {
-        const data = await detectScenesFromNode(video.node, { withLabels });
+        const { data, thumb } = await detectScenesFromNode(video.node, { withLabels });
         await saveScenes(storage, video.id, data, video.node as unknown as MutableFile);
+        if (thumb) {
+          try {
+            await saveThumbnailFrame(storage, video.id, thumb.blob);
+          } catch (err) {
+            console.warn('Thumbnail save failed for', video.name, err);
+          }
+        }
         result.generated++;
       } catch (err) {
         console.warn('Scene detection failed for', video.name, err);

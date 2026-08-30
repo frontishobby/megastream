@@ -13,7 +13,7 @@
     type SceneData,
   } from '../scenes';
   import { resolveSceneAnalysisMode } from '../labeler';
-  import { THUMB_FOLDER } from '../thumbnails';
+  import { THUMB_FOLDER, saveThumbnailFrame } from '../thumbnails';
   import type { Storage, MutableFile, File as MegaFile } from 'megajs';
   import { showToast } from '../toast.svelte';
 
@@ -124,7 +124,7 @@
       player?.pause();
     } catch (_) {}
     try {
-      const data = await detectScenesFromNode(node.node, {
+      const { data, thumb } = await detectScenesFromNode(node.node, {
         withLabels: mode === 'labeled',
         onProgress: (processed, dur) => {
           detecting = { processed, duration: dur };
@@ -133,6 +133,13 @@
       const storage = (node.node as unknown as { storage?: Storage }).storage;
       if (storage) {
         await saveScenes(storage, node.id, data, node.node as unknown as MutableFile);
+        if (thumb) {
+          try {
+            await saveThumbnailFrame(storage, node.id, thumb.blob);
+          } catch (err) {
+            console.warn('Thumbnail save failed for', node.name, err);
+          }
+        }
       }
       scenes = data;
     } catch (err) {

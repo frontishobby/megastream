@@ -33,6 +33,11 @@ export interface FrameLabel {
   positions: Record<string, number>;
   /** General booru tags for the frame, tag -> confidence. */
   tags: Record<string, number>;
+  /**
+   * Framing/composition tag probs for thumbnail scoring, exempt from the
+   * server's top-k cutoff. Absent when the server predates the field.
+   */
+  thumb?: Record<string, number>;
 }
 
 export async function classifyFrame(frame: Blob, mediaTime?: number): Promise<FrameLabel | null> {
@@ -62,6 +67,7 @@ export async function classifyFrame(frame: Blob, mediaTime?: number): Promise<Fr
       confidence: typeof data.confidence === 'number' ? data.confidence : null,
       positions: readMap(data.positions),
       tags: readMap(data.tags),
+      thumb: data.thumb ? readMap(data.thumb) : undefined,
     };
   } catch (err) {
     console.warn('Frame classification failed', err);

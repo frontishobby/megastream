@@ -1,7 +1,8 @@
 import type { MutableFile, Storage } from 'megajs';
 import { MegaService } from './mega';
 import { isTransportStream } from './stream';
-import { detectScenesFromFile, saveScenes, type SceneData } from './scenes';
+import { detectScenesFromFile, saveScenes, type SceneScanResult } from './scenes';
+import { saveThumbnailFrame } from './thumbnails';
 import { generateStripFromFile, saveStrip } from './strips';
 import type { SceneAnalysisMode } from './labeler';
 
@@ -121,7 +122,7 @@ async function run(
   // runs in parallel with the (network-bound) upload and is usually done
   // before the last byte is sent.
   let analysisAbort: AbortController | null = null;
-  let analysis: Promise<SceneData | null> | null = null;
+  let analysis: Promise<SceneScanResult | null> | null = null;
   if (sceneMode !== 'skip' && MegaService.isVideo(file.name) && !isTransportStream(file.name)) {
     const abort = new AbortController();
     analysisAbort = abort;
@@ -191,19 +192,26 @@ async function run(
       if (current && current.status === 'uploading') {
         current.status = 'analyzing';
         current.uploaded = current.size;
-        const scenes = await analysis;
+        const scan = await analysis;
         const storage = (folder as unknown as { storage?: Storage }).storage;
         const videoId = (uploadedNode as unknown as { nodeId?: string } | undefined)?.nodeId;
-        if (scenes && storage && videoId) {
+        if (scan && storage && videoId) {
           try {
-            await saveScenes(storage, videoId, scenes, uploadedNode);
+            await saveScenes(storage, videoId, scan.data, uploadedNode);
           } catch (err) {
             console.warn('Failed to save scene data for', file.name, err);
+          }
+          if (scan.thumb) {
+            try {
+              await saveThumbnailFrame(storage, videoId, scan.thumb.blob);
+            } catch (err) {
+              console.warn('Thumbnail save failed for', file.name, err);
+            }
           }
           // Animated thumbnail strip from the local file while we still
           // have it — a handful of local seeks, then one small upload.
           try {
-            const cap = await generateStripFromFile(file, scenes);
+            const cap = await generateStripFromFile(file, scan.data);
             if (cap) await saveStrip(storage, videoId, cap);
           } catch (err) {
             console.warn('Strip generation failed for', file.name, err);

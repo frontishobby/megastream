@@ -84,6 +84,29 @@ POSITION_TAGS = {
     # and it has no clean position label of its own.
 }
 
+# Framing/composition tags returned on every response regardless of the
+# top-k cutoff, so the client can score frames for thumbnail selection
+# (face + body visible beats close-ups). Order/content is free to tune;
+# missing vocabulary entries are skipped at load time.
+THUMB_TAGS = [
+    "looking_at_viewer",
+    "smile",
+    "portrait",
+    "upper_body",
+    "lower_body",
+    "full_body",
+    "cowboy_shot",
+    "close-up",
+    "blurry",
+    "motion_blur",
+    "from_behind",
+    "head_out_of_frame",
+    "out_of_frame",
+    "profile",
+    "1girl",
+    "solo",
+]
+
 # Make the pip-installed NVIDIA wheels' DLLs findable; without this,
 # onnxruntime looks for a system CUDA Toolkit (cublasLt64_12.dll etc.) and
 # silently falls back to CPU when it's not installed.
@@ -115,6 +138,7 @@ with open(_csv_path, newline="", encoding="utf-8") as f:
     _rows = list(csv.DictReader(f))
 _tag_names = [r["name"] for r in _rows]
 _general = np.array([r["category"] == "0" for r in _rows])
+_thumb_idx = {t: _tag_names.index(t) for t in THUMB_TAGS if t in _tag_names}
 print(
     f"Ready: {len(_tag_names)} tags, input {_input_size}px, "
     f"providers {_session.get_providers()}, vlm {VLM_MODEL or 'off'}"
@@ -154,14 +178,16 @@ def preprocess(img: Image.Image, size: int) -> np.ndarray:
     return np.expand_dims(arr, 0)
 
 
-def infer_tags(img: Image.Image) -> dict:
+def infer_tags(img: Image.Image) -> tuple[dict, dict]:
+    """Returns (general tags >= 0.1, thumb-framing tag probs)."""
     arr = preprocess(img, _input_size)
     probs = _session.run(None, {_input.name: arr})[0][0].astype(float)
     out = {}
     for i, p in enumerate(probs):
         if _general[i] and p >= 0.1:
             out[_tag_names[i]] = p
-    return out
+    thumb = {t: float(probs[i]) for t, i in _thumb_idx.items()}
+    return out, thumb
 
 
 # Penetration defines a scene even when oral/hand play is simultaneously
@@ -241,7 +267,7 @@ async def classify(request: Request):
     except Exception:
         return Response(status_code=400, content="not an image")
 
-    tags = infer_tags(img)
+    tags, thumb = infer_tags(img)
     position, conf = pick_position(tags)
     source = "wd"
     if VLM_MODEL and (position is None or conf < VLM_ESCALATE):
@@ -267,4 +293,5 @@ async def classify(request: Request):
         "source": source,
         "positions": position_scores(tags),
         "tags": {k: round(v, 3) for k, v in top.items()},
+        "thumb": {k: round(v, 3) for k, v in thumb.items()},
     }

@@ -297,6 +297,35 @@ export function uploadBytes(folder: MutableFile, name: string, bytes: Uint8Array
 }
 
 /**
+ * Stores a frame captured during an AI scene scan as the video's thumbnail,
+ * replacing any previously generated one — the scan picks a frame where the
+ * performer's face and body are actually visible, which beats the blind
+ * midpoint grab below.
+ */
+export async function saveThumbnailFrame(
+  storage: Storage,
+  videoId: string,
+  blob: Blob
+): Promise<void> {
+  const folder = await ensureThumbFolder(storage);
+  const names = THUMB_EXTS.map((ext) => thumbFileName(videoId, ext));
+  const stale = ((folder.children || []) as MutableFile[]).filter(
+    (c) => !c.directory && names.includes(c.name || '')
+  );
+  for (const f of stale) {
+    try {
+      await f.delete(true);
+    } catch (err) {
+      console.warn('Failed to remove stale thumbnail', err);
+    }
+  }
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  await uploadBytes(folder, thumbFileName(videoId, 'jpg'), bytes);
+  await setCached(videoId, await blobToDataUrl(blob));
+  thumbnailEvents.dispatchEvent(new CustomEvent('thumbnail', { detail: videoId }));
+}
+
+/**
  * Generates thumbnails for the given videos and stores them as
  * `.megastream/<nodeId>.jpg` in the account. Videos that already have a
  * stored thumbnail are skipped.
