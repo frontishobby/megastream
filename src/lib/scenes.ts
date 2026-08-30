@@ -400,8 +400,8 @@ async function runDetection(
 }
 
 const LABEL_FRAME_MAX_W = 512;
-// v5: samples carry framing-tag probs and the sweep picks a thumbnail frame.
-const SWEEP_DETECTOR = 'label-sweep-v5';
+// v6: thumb picking gained luma + facing-away penalties and a score floor.
+const SWEEP_DETECTOR = 'label-sweep-v6';
 const STORED_TAG_MIN = 0.25;
 const STORED_THUMB_MIN = 0.05;
 
@@ -445,6 +445,7 @@ function compactSamples(samples: InternalSample[]): SweepSample[] {
 const THUMB_WEIGHTS: Record<string, number> = {
   looking_at_viewer: 2.0,
   smile: 0.8,
+  looking_back: 0.6, // face over the shoulder still beats no face
   cowboy_shot: 1.5, // mid-thigh-up framing: face + most of the body
   full_body: 1.2,
   upper_body: 1.0,
@@ -453,11 +454,14 @@ const THUMB_WEIGHTS: Record<string, number> = {
   'close-up': -1.5,
   lower_body: -1.2,
   from_behind: -1.0,
+  facing_away: -2.0,
+  ass_focus: -1.5,
   profile: -0.3,
   head_out_of_frame: -2.0,
   out_of_frame: -0.5,
   blurry: -1.0,
   motion_blur: -0.5,
+  dark: -0.5, // mild — the measured luma penalty below does the real work
 };
 
 function thumbScore(probs: Record<string, number>): number {
@@ -466,6 +470,30 @@ function thumbScore(probs: Record<string, number>): number {
     score += weight * (probs[tag] ?? 0);
   }
   return score;
+}
+
+// Mean luma (0-255) below which a frame starts losing score: murky bedroom
+// footage all tags alike, so brightness — measured straight off the canvas,
+// no model involved — is what separates the legible frames.
+const THUMB_DARK_LUMA = 70;
+const THUMB_DARK_WEIGHT = 2.0;
+// Best frame must clear this bar or the existing thumbnail is kept; below
+// it no frame showed a usable face anyway ('1girl' alone tops out ~0.5).
+const THUMB_MIN_SCORE = 0.8;
+
+function meanLuma(ctx: CanvasRenderingContext2D, w: number, h: number): number {
+  try {
+    const px = ctx.getImageData(0, 0, w, h).data;
+    let sum = 0;
+    let n = 0;
+    for (let i = 0; i < px.length; i += 64) {
+      sum += px[i] * 3 + px[i + 1] * 4 + px[i + 2];
+      n++;
+    }
+    return n ? sum / (8 * n) : 128;
+  } catch (_) {
+    return 128; // unreadable — treat as neutral, tags alone decide
+  }
 }
 
 /** Best thumbnail frame found during a labelled sweep. */
@@ -610,7 +638,10 @@ async function runLabelSweepSeek(
   // classification, so keeping the winner costs nothing extra. (Wrapped in
   // an object: assignments inside the classify closures are invisible to
   // the outer control-flow analysis, which would pin a bare let to null.)
-  const best: { thumb: ThumbFrame | null } = { thumb: null };
+  const best: { thumb: ThumbFrame | null; noThumbField: boolean } = {
+    thumb: null,
+    noThumbField: false,
+  };
 
   // Sample mid-interval (2s, 6s, …) so the first point is a real seek and
   // each frame represents its surrounding interval.
@@ -639,6 +670,7 @@ async function runLabelSweepSeek(
     }
     attempts++;
     const at = t;
+    const luma = meanLuma(ctx, canvas.width, canvas.height);
     tasks.push(
       (async () => {
         const blob = await new Promise<Blob | null>((resolve) =>
@@ -655,9 +687,15 @@ async function runLabelSweepSeek(
           tags: label.tags,
           thumb: label.thumb,
         });
-        // Older servers omit `thumb`; the top-k tags still carry some of the
-        // framing signal, so score with what's there.
-        const score = thumbScore(label.thumb ?? label.tags);
+        // Older servers omit `thumb`; top-k tags are too spotty to score
+        // with, so leave the existing thumbnail alone instead of guessing.
+        if (!label.thumb) {
+          best.noThumbField = true;
+          return;
+        }
+        const score =
+          thumbScore(label.thumb) -
+          (Math.max(0, THUMB_DARK_LUMA - luma) / THUMB_DARK_LUMA) * THUMB_DARK_WEIGHT;
         if (!best.thumb || score > best.thumb.score) {
           best.thumb = { blob, t: at, score };
         }
@@ -683,12 +721,26 @@ async function runLabelSweepSeek(
     samples: compactSamples(samples),
   };
   dumpSweepDebug(samples, data);
-  if (best.thumb) {
-    console.log(
-      `[scene-scan] thumb frame @${best.thumb.t.toFixed(1)}s (score ${best.thumb.score.toFixed(2)})`
+  if (best.noThumbField) {
+    console.warn(
+      '[scene-scan] labeler predates thumb scoring — git pull + restart the labeler; thumbnail left unchanged'
     );
   }
-  return { data, thumb: best.thumb };
+  let thumb = best.thumb;
+  if (thumb) {
+    if (thumb.score < THUMB_MIN_SCORE) {
+      console.log(
+        `[scene-scan] best thumb frame @${thumb.t.toFixed(1)}s scored ` +
+          `${thumb.score.toFixed(2)} < ${THUMB_MIN_SCORE} — keeping existing thumbnail`
+      );
+      thumb = null;
+    } else {
+      console.log(
+        `[scene-scan] thumb frame @${thumb.t.toFixed(1)}s (score ${thumb.score.toFixed(2)})`
+      );
+    }
+  }
+  return { data, thumb };
 }
 
 /**
