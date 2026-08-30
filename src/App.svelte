@@ -233,6 +233,21 @@
     nodes.filter((n) => n.type === 'file' && MegaService.isVideo(n.name))
   );
 
+  // Folder shorts covers the whole subtree, so the button should light up even
+  // when the videos only live in subfolders.
+  const hasSubtreeVideos = $derived.by(() => {
+    void nodes; // re-run on structural changes
+    const f = currentFolder;
+    if (!f) return false;
+    const walk = (folder: MegaFile): boolean =>
+      MegaService.listChildren(folder).some(
+        (child) =>
+          (child.type === 'file' && MegaService.isVideo(child.name)) ||
+          (child.type === 'folder' && walk(child.node))
+      );
+    return walk(f);
+  });
+
   async function handleGenerateThumbnails() {
     if (!storage || thumbGen) return;
     const targets = videoNodes;
@@ -360,8 +375,14 @@
       t.children = [...(t.children ?? []), source];
       (source as unknown as { parent?: MegaFile }).parent = target;
       treeVersion++;
-      const tid = (target as unknown as { nodeId?: string }).nodeId;
-      if (tid) expandedFolders.add(tid);
+      // Reveal only where the folder landed: collapse everything else and
+      // expand just the chain down to the target (the route $effect re-adds
+      // the currently open folder's own path right after).
+      expandedFolders.clear();
+      for (let cur: MegaFile | undefined = target; cur; cur = cur.parent) {
+        const cid = (cur as unknown as { nodeId?: string }).nodeId;
+        if (cid) expandedFolders.add(cid);
+      }
       // If the open folder was the old parent, the target, or sits inside the
       // moved subtree, its listing/breadcrumb is now stale — rebuild both.
       if (currentFolder) {
@@ -629,7 +650,7 @@
               onclick={() =>
                 currentFolderId &&
                 navigate({ kind: 'shorts', scope: 'folder', folderId: currentFolderId })}
-              disabled={!currentFolderId || videoNodes.length === 0}
+              disabled={!currentFolderId || !hasSubtreeVideos}
               class="inline-flex items-center gap-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 text-sm font-medium px-4 py-2 rounded-full transition-colors"
             >
               <ListVideo size={16} />

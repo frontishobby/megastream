@@ -49,9 +49,16 @@ export function collectCandidates(
   if (scope === 'folder') {
     const folder = folderId ? files[folderId] : undefined;
     if (!folder?.directory) return [];
-    return MegaService.listChildren(folder).filter(
-      (n) => n.type === 'file' && isPlayableVideo(n.name)
-    );
+    // The whole subtree counts, not just direct children.
+    const out: MegaNode[] = [];
+    const walk = (f: MegaFile) => {
+      for (const n of MegaService.listChildren(f)) {
+        if (n.type === 'folder') walk(n.node);
+        else if (isPlayableVideo(n.name)) out.push(n);
+      }
+    };
+    walk(folder);
+    return out;
   }
 
   const root = storage.root as unknown as MegaFile;
