@@ -18,16 +18,21 @@
   let thumbnail = $state<string | null>(null);
   let thumbnailLoading = $state(false);
 
-  // Animated scene strip: middle frame at rest, cycling while hovered (or a
-  // touch is held on mobile).
+  // Animated scene strip, cycling while hovered (or a touch is held on
+  // mobile). At rest the card shows the stored thumbnail — the AI scan picks
+  // that frame for face+body visibility, so the strip must not cover it;
+  // the strip's middle frame is only the resting image when no thumbnail
+  // exists.
   let strip = $state<StripData | null>(null);
   let frameIdx = $state(0);
+  let previewing = $state(false);
   let cycleTimer: number | null = null;
   let touchStartedAt = 0;
 
   const midFrame = (s: StripData) => Math.floor(s.frames / 2);
 
   function startCycle() {
+    previewing = true;
     if (!strip || strip.frames <= 1 || cycleTimer != null) return;
     cycleTimer = window.setInterval(() => {
       if (strip) frameIdx = (frameIdx + 1) % strip.frames;
@@ -35,6 +40,7 @@
   }
 
   function stopCycle() {
+    previewing = false;
     if (cycleTimer != null) {
       clearInterval(cycleTimer);
       cycleTimer = null;
@@ -287,7 +293,7 @@
   ontouchcancel={handleTouchEnd}
 >
   <div class="aspect-video bg-gray-900 relative overflow-hidden" data-card-surface>
-    {#if strip}
+    {#if strip && (previewing || !thumbnail)}
       <div
         class="w-full h-full select-none"
         data-card-surface
