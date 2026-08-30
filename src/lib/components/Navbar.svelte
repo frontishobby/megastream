@@ -20,7 +20,7 @@
   }>();
 </script>
 
-<nav class="bg-gray-900 text-white p-4 sticky top-0 z-10 shadow-lg">
+<nav class="bg-gray-900 text-white p-4 pt-[calc(1rem+env(safe-area-inset-top))] sticky top-0 z-10 shadow-lg">
   <div class="container mx-auto flex flex-col gap-3">
     <div class="flex flex-wrap md:flex-nowrap items-center gap-x-4 gap-y-3">
       <div class="flex items-center gap-2 flex-shrink-0">

@@ -777,7 +777,7 @@
 
   <!-- HUD -->
   <div
-    class="absolute inset-x-0 top-0 z-20 p-4 bg-gradient-to-b from-black/70 to-transparent flex items-start gap-3 transition-opacity duration-300 {hudVisible
+    class="absolute inset-x-0 top-0 z-20 p-4 pt-[calc(1rem+env(safe-area-inset-top))] bg-gradient-to-b from-black/70 to-transparent flex items-start gap-3 transition-opacity duration-300 {hudVisible
       ? 'opacity-100'
       : 'opacity-0 pointer-events-none'}"
   >
