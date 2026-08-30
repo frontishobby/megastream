@@ -132,11 +132,14 @@
     } catch (err) {
       if (slots[i].gen !== gen || disposed) return;
       slots[i].loading = false;
-      if (opts.preload) {
-        clearSlot(i);
-      } else {
+      // A preload slot can have been promoted to active while the stream was
+      // still connecting, so route the failure by current role, not by how
+      // the load started.
+      if (i === active) {
         showStreamErrorToast('Shorts stream failed', err);
         failAdvance();
+      } else {
+        clearSlot(i);
       }
     }
   }
@@ -220,9 +223,11 @@
   let prefetchLock = false;
 
   // The standby preload competes with the active stream for radio bandwidth
-  // on mobile, so it only starts once the active video is comfortably
-  // buffered (or buffered to its end, for clips shorter than the threshold).
-  const PREFETCH_BUFFER_AHEAD_S = 15;
+  // on mobile, so it only starts once the active video has a few seconds
+  // buffered (or is buffered to its end, for clips shorter than the
+  // threshold) — enough to prove playback isn't starved, low enough that the
+  // next video is usually ready by the time the user swipes.
+  const PREFETCH_BUFFER_AHEAD_S = 6;
 
   function maybePrefetch(i: number) {
     if (i !== active || disposed) return;
@@ -327,8 +332,11 @@
         return;
       }
       const sIdx = standbyIdx;
-      if (slots[sIdx].entry && slots[sIdx].url) {
-        // Preloaded next — slide it in and keep its (already-buffering) stream.
+      if (slots[sIdx].entry) {
+        // Preloaded next — slide it in and keep its (already-buffering)
+        // stream. If the stream URL is still being set up, adopt the slot
+        // anyway: the <video> mounts and autoplays when loadSlot finishes,
+        // which beats discarding the pick and starting over.
         await runSlide('forward');
         const entry = slots[sIdx].entry!;
         history = [...history, entry];
@@ -337,7 +345,7 @@
         active = sIdx;
         clearSlot(old);
         finishSlide();
-        playActive();
+        if (slots[sIdx].url) playActive();
         return;
       }
       // Prefetch not ready (rapid swipes / startup) — slide to an empty panel,
