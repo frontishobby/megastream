@@ -338,6 +338,49 @@
     }
   }
 
+  let movingFolder = $state(false);
+
+  async function handleFolderMove(sourceId: string, target: MegaFile) {
+    if (!storage || movingFolder) return;
+    const source = (storage as unknown as { files: Record<string, MegaFile> }).files[sourceId];
+    if (!source?.directory || source === target || source.parent === target) return;
+    movingFolder = true;
+    try {
+      const oldParent = source.parent;
+      await MegaService.moveFile(source, target);
+      // The server event that re-parents the local tree can lag; do it now so
+      // the sidebar reflects the move immediately. megajs skips its own
+      // re-parenting when the parent already matches, so this won't double up.
+      if (oldParent?.children) {
+        (oldParent as unknown as { children: MegaFile[] }).children = oldParent.children.filter(
+          (c) => c !== source
+        );
+      }
+      const t = target as unknown as { children?: MegaFile[] };
+      t.children = [...(t.children ?? []), source];
+      (source as unknown as { parent?: MegaFile }).parent = target;
+      treeVersion++;
+      const tid = (target as unknown as { nodeId?: string }).nodeId;
+      if (tid) expandedFolders.add(tid);
+      // If the open folder was the old parent, the target, or sits inside the
+      // moved subtree, its listing/breadcrumb is now stale — rebuild both.
+      if (currentFolder) {
+        const path: MegaFile[] = [];
+        let cur: MegaFile | undefined = currentFolder;
+        while (cur) {
+          path.unshift(cur);
+          cur = cur.parent;
+        }
+        pathFolders = path;
+        nodes = MegaService.listChildren(currentFolder);
+      }
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    } finally {
+      movingFolder = false;
+    }
+  }
+
   async function handleCreateFolder() {
     if (!currentFolder || creatingFolder) return;
     const name = window.prompt('New folder name')?.trim();
@@ -543,6 +586,7 @@
                 expanded={expandedFolders}
                 version={treeVersion}
                 onSelect={handleFolderSelect}
+                onMoveFolder={handleFolderMove}
               />
             {/if}
           </div>
@@ -769,6 +813,7 @@
         <a href="https://svelte.dev" class="text-red-500 hover:underline">Svelte 5</a> &
         <a href="https://github.com/tonygomes/megajs" class="text-blue-500 hover:underline">megajs</a>.
       </p>
+      <p class="mt-1 text-xs text-gray-700">Build {__BUILD_VERSION__}</p>
     </footer>
   </div>
 {/if}

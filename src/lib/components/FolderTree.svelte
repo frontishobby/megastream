@@ -1,3 +1,10 @@
+<script lang="ts" module>
+  // The folder currently being dragged, shared by every row of the tree so
+  // each row can decide whether it is a valid drop target during dragover
+  // (dataTransfer contents are unreadable until drop).
+  let dragging = $state<{ id: string; parentId: string | null } | null>(null);
+</script>
+
 <script lang="ts">
   import type { File as MegaFile } from 'megajs';
   import { ChevronRight, ChevronDown, Folder, FolderOpen } from '@lucide/svelte';
@@ -12,6 +19,7 @@
     expanded,
     version = 0,
     onSelect,
+    onMoveFolder,
   } = $props<{
     node: MegaFile;
     depth?: number;
@@ -21,6 +29,7 @@
     /** Bumped by the parent when the (non-reactive) mega tree changes. */
     version?: number;
     onSelect: (node: MegaFile, isRoot: boolean) => void;
+    onMoveFolder?: (sourceId: string, target: MegaFile) => void;
   }>();
 
   const id = $derived((node as unknown as { nodeId?: string }).nodeId);
@@ -57,6 +66,62 @@
     onSelect(node, isRoot);
   }
 
+  // Counter instead of a boolean: dragenter/dragleave fire for every child
+  // element crossed, so a plain flag flickers off mid-drag.
+  let dragDepth = $state(0);
+
+  const isDropTarget = $derived.by(() => {
+    if (!dragging || !id) return false;
+    if (dragging.parentId === id) return false; // already lives here
+    // Reject the dragged folder itself and anything inside its subtree.
+    for (let cur: MegaFile | undefined = node; cur; cur = cur.parent) {
+      if ((cur as unknown as { nodeId?: string }).nodeId === dragging.id) return false;
+    }
+    return true;
+  });
+  const dropActive = $derived(isDropTarget && dragDepth > 0);
+
+  function onDragStart(e: DragEvent) {
+    if (isRoot || !id) return;
+    const parentId =
+      ((node.parent ?? undefined) as unknown as { nodeId?: string } | undefined)?.nodeId ?? null;
+    dragging = { id, parentId };
+    if (e.dataTransfer) {
+      e.dataTransfer.setData('application/x-megastream-folder', id);
+      e.dataTransfer.effectAllowed = 'move';
+    }
+  }
+
+  function onDragEnd() {
+    dragging = null;
+    dragDepth = 0;
+  }
+
+  function onDragEnter(e: DragEvent) {
+    if (!isDropTarget) return;
+    e.preventDefault();
+    dragDepth++;
+  }
+
+  function onDragOver(e: DragEvent) {
+    if (!isDropTarget) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+  }
+
+  function onDragLeave() {
+    if (dragDepth > 0) dragDepth--;
+  }
+
+  function onDrop(e: DragEvent) {
+    if (!isDropTarget || !dragging) return;
+    e.preventDefault();
+    const sourceId = dragging.id;
+    dragging = null;
+    dragDepth = 0;
+    onMoveFolder?.(sourceId, node);
+  }
+
   function onKey(e: KeyboardEvent) {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
@@ -76,10 +141,19 @@
   tabindex="0"
   class="flex items-center gap-1 rounded-md py-1 pr-2 cursor-pointer text-sm select-none transition-colors focus:outline-none focus:ring-1 focus:ring-red-500 {isSelected
     ? 'bg-red-600/20 text-white'
-    : 'text-gray-300 hover:bg-gray-800'}"
+    : 'text-gray-300 hover:bg-gray-800'} {dropActive
+    ? 'bg-blue-500/20 ring-1 ring-inset ring-blue-500'
+    : ''}"
   style="padding-left: {depth * 14 + 6}px"
+  draggable={!isRoot}
   onclick={select}
   onkeydown={onKey}
+  ondragstart={onDragStart}
+  ondragend={onDragEnd}
+  ondragenter={onDragEnter}
+  ondragover={onDragOver}
+  ondragleave={onDragLeave}
+  ondrop={onDrop}
 >
   {#if hasChildren && !isRoot}
     <button
@@ -120,7 +194,15 @@
 {#if isOpen && hasChildren}
   <div role="group">
     {#each childFolders as child (child.nodeId)}
-      <FolderTree node={child} depth={depth + 1} {currentId} {expanded} {version} {onSelect} />
+      <FolderTree
+        node={child}
+        depth={depth + 1}
+        {currentId}
+        {expanded}
+        {version}
+        {onSelect}
+        {onMoveFolder}
+      />
     {/each}
   </div>
 {/if}
