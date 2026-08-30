@@ -11,11 +11,12 @@
     ChevronDown,
     Play,
     Shuffle,
+    Folder,
     Trash2,
     Loader2,
   } from '@lucide/svelte';
   import { untrack } from 'svelte';
-  import type { Storage } from 'megajs';
+  import type { Storage, File as MegaFile } from 'megajs';
   import { MegaService, type MegaNode } from '../mega';
   import { getStoredScenes, sceneEvents, type Scene } from '../scenes';
   import { createStreamUrl } from '../stream';
@@ -41,6 +42,17 @@
   let history = $state<ShortsEntry[]>([]);
   let cursor = $state(-1);
   const current = $derived(history[cursor] ?? null);
+
+  // Folder chain of the playing video, root excluded ("Root" when top-level).
+  const currentFolderPath = $derived.by(() => {
+    const file = current?.node.node as MegaFile | undefined;
+    if (!file) return '';
+    const parts: string[] = [];
+    for (let cur = file.parent; cur?.parent; cur = cur.parent) {
+      parts.unshift(cur.name || 'Folder');
+    }
+    return parts.length > 0 ? parts.join(' / ') : 'Root';
+  });
   const prevEntry = $derived(cursor > 0 ? history[cursor - 1] : null);
   const redoEntry = $derived(
     cursor >= 0 && cursor < history.length - 1 ? history[cursor + 1] : null
@@ -793,6 +805,10 @@
     <div class="flex-1 min-w-0">
       <p class="text-sm font-medium truncate">{current?.node.name ?? '…'}</p>
       {#if current}
+        <p class="text-xs text-gray-400 mt-0.5 flex items-center gap-1 min-w-0">
+          <Folder size={11} class="shrink-0 text-blue-400" />
+          <span class="truncate">{currentFolderPath}</span>
+        </p>
         <p class="text-xs text-gray-400 mt-0.5 flex items-center gap-2">
           <span class="inline-flex items-center gap-1">
             <Shuffle size={11} />
