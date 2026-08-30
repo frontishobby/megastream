@@ -219,6 +219,32 @@
 
   let prefetchLock = false;
 
+  // The standby preload competes with the active stream for radio bandwidth
+  // on mobile, so it only starts once the active video is comfortably
+  // buffered (or buffered to its end, for clips shorter than the threshold).
+  const PREFETCH_BUFFER_AHEAD_S = 15;
+
+  function maybePrefetch(i: number) {
+    if (i !== active || disposed) return;
+    const el = slotEls[i];
+    if (!el || !slots[i].entry || !slots[i].url) return;
+    const t = el.currentTime;
+    let bufferedEnd = 0;
+    for (let k = 0; k < el.buffered.length; k++) {
+      if (el.buffered.start(k) <= t && t <= el.buffered.end(k)) {
+        bufferedEnd = el.buffered.end(k);
+        break;
+      }
+    }
+    const dur = el.duration;
+    if (
+      bufferedEnd - t >= PREFETCH_BUFFER_AHEAD_S ||
+      (Number.isFinite(dur) && bufferedEnd >= dur - 0.5)
+    ) {
+      ensurePrefetch();
+    }
+  }
+
   async function ensurePrefetch() {
     if (disposed || prefetchLock) return;
     if (cursor !== history.length - 1) return; // only prefetch at the head
@@ -312,7 +338,6 @@
         clearSlot(old);
         finishSlide();
         playActive();
-        ensurePrefetch();
         return;
       }
       // Prefetch not ready (rapid swipes / startup) — slide to an empty panel,
@@ -419,7 +444,6 @@
       el.play().catch(() => {
         paused = true;
       });
-      ensurePrefetch();
     } else {
       el.pause();
     }
@@ -725,6 +749,8 @@
           muted={i === active ? muted : true}
           onloadedmetadata={() => onSlotMetadata(i)}
           onloadeddata={() => (slots[i].hasFrame = true)}
+          onprogress={() => maybePrefetch(i)}
+          ontimeupdate={() => maybePrefetch(i)}
           onended={() => i === active && advanceForward()}
           onerror={() => onSlotError(i)}
           onplay={() => i === active && (paused = false)}

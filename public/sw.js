@@ -7,9 +7,12 @@ const sessions = new Map();
 // transfer and memory for a few seconds of playback. Answering with a short
 // window is an ordinary 206; the browser just asks for the next one.
 //
-// Measured on a 1.1 GB file, from page load to the first frame: 2.01 GB pulled
-// before, 788 MB after.
-const MAX_WINDOW = 8 * 1024 * 1024;
+// Since then the pause/resume backpressure below caps what's actually in
+// flight, so the window no longer protects memory — but every window boundary
+// restarts the megajs stream (a fresh MEGA `g` API roundtrip plus chunk
+// ramp-up), and on high-RTT mobile links those restarts drain the playback
+// buffer. Hence a much larger window than the original 8 MB.
+const MAX_WINDOW = 64 * 1024 * 1024;
 
 // The <video> element stops *reading* a response once its buffer is full but
 // keeps the connection open, so the queue has to push back on the page rather

@@ -5,7 +5,14 @@ interface MegaFileLike {
   // the size is absent
   size?: number;
   name?: string | null;
-  download(opts: { start: number; end: number; maxConnections?: number }): any;
+  download(opts: {
+    start: number;
+    end: number;
+    maxConnections?: number;
+    initialChunkSize?: number;
+    chunkSizeIncrement?: number;
+    maxChunkSize?: number;
+  }): any;
 }
 
 interface FetchRangeMessage {
@@ -143,6 +150,13 @@ function handleFetchRange(req: FetchRangeMessage, port: MessagePort) {
         start: req.start + sent,
         end: req.end,
         maxConnections: session.maxConnections,
+        // megajs defaults ramp chunks 128KB→1MB, which means 10+ CDN round
+        // trips per window — painful on high-RTT mobile links. Start small so
+        // seeks show a frame fast, but grow to much larger chunks; the cost is
+        // a bigger retry unit when a chunk fails.
+        initialChunkSize: 256 * 1024,
+        chunkSizeIncrement: 512 * 1024,
+        maxChunkSize: 4 * 1024 * 1024,
       });
     } catch (err: any) {
       fail(err);
