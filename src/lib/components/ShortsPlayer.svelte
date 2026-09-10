@@ -572,22 +572,16 @@
     skipFlashTimer = setTimeout(() => (skipFlash = null), 700);
   }
 
-  // --- Fullscreen / orientation (user-initiated via the button or `f`;
-  // landscape lock is best-effort and only possible while fullscreen) ---
+  // --- Fullscreen (entered on the way in on mobile, or via the button / `f`).
+  // Orientation is left alone so portrait and landscape both work as held. ---
   $effect(() => {
     const onFs = () => {
       fullscreen = !!document.fullscreenElement;
-      if (document.fullscreenElement) {
-        (screen.orientation as unknown as { lock?: (o: string) => Promise<void> })
-          ?.lock?.('landscape')
-          .catch(() => {});
-      }
     };
     onFs();
     document.addEventListener('fullscreenchange', onFs);
     return () => {
       document.removeEventListener('fullscreenchange', onFs);
-      (screen.orientation as unknown as { unlock?: () => void })?.unlock?.();
       if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     };
   });

@@ -13,7 +13,7 @@
     clearSession,
     hasSavedSession,
   } from './lib/session';
-  import { router, navigate } from './lib/router.svelte';
+  import { router, navigate, type Route } from './lib/router.svelte';
   import { enqueueUpload } from './lib/upload.svelte';
   import UploadPanel from './lib/components/UploadPanel.svelte';
   import ToastHost from './lib/components/ToastHost.svelte';
@@ -61,6 +61,21 @@
     const attrs = (file as unknown as { attributes?: { _memo?: unknown } }).attributes;
     const m = attrs?._memo;
     return typeof m === 'string' && m.length > 0 ? m : undefined;
+  }
+
+  // Mobile browsers only tuck the URL bar away on a real page scroll or in
+  // fullscreen. The shorts overlay never scrolls (it owns the swipe gestures),
+  // so ask for fullscreen while we still hold the tap's user activation.
+  // Desktop and installed (standalone) PWAs have nothing to hide, so they skip it.
+  function openShorts(route: Extract<Route, { kind: 'shorts' }>) {
+    const mobile = matchMedia('(pointer: coarse)').matches;
+    const standalone =
+      matchMedia('(display-mode: standalone)').matches ||
+      (navigator as unknown as { standalone?: boolean }).standalone === true;
+    if (mobile && !standalone && !document.fullscreenElement) {
+      document.documentElement.requestFullscreen?.({ navigationUI: 'hide' }).catch(() => {});
+    }
+    navigate(route);
   }
 
   function resolveFolderFromRoute(s: Storage): MegaFile {
@@ -639,7 +654,7 @@
           <div class="flex flex-wrap justify-end mb-4 gap-2">
             <button
               type="button"
-              onclick={() => navigate({ kind: 'shorts', scope: 'all' })}
+              onclick={() => openShorts({ kind: 'shorts', scope: 'all' })}
               class="inline-flex items-center gap-2 bg-gray-800 hover:bg-gray-700 text-gray-100 text-sm font-medium px-4 py-2 rounded-full transition-colors"
             >
               <Shuffle size={16} />
@@ -649,7 +664,7 @@
               type="button"
               onclick={() =>
                 currentFolderId &&
-                navigate({ kind: 'shorts', scope: 'folder', folderId: currentFolderId })}
+                openShorts({ kind: 'shorts', scope: 'folder', folderId: currentFolderId })}
               disabled={!currentFolderId || !hasSubtreeVideos}
               class="inline-flex items-center gap-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-gray-100 text-sm font-medium px-4 py-2 rounded-full transition-colors"
             >
