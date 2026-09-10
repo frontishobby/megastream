@@ -67,8 +67,8 @@
   let consecutiveErrors = 0;
 
   // --- Two media slots: the active one plays, the standby one preloads the
-  // next random pick (2 connections, paused at its scene start) so a forward
-  // swipe can slide an already-buffered video in. ---
+  // next random pick (2 connections, paused at its scene start) so advancing
+  // can slide an already-buffered video in. ---
   interface Slot {
     entry: ShortsEntry | null;
     url: string | null;
@@ -227,7 +227,7 @@
   // on mobile, so it only starts once the active video has a few seconds
   // buffered (or is buffered to its end, for clips shorter than the
   // threshold) — enough to prove playback isn't starved, low enough that the
-  // next video is usually ready by the time the user swipes.
+  // next video is usually ready by the time the user advances.
   const PREFETCH_BUFFER_AHEAD_S = 6;
 
   function bufferedEndAt(el: HTMLVideoElement, t: number): number {
@@ -352,7 +352,7 @@
         if (slots[sIdx].url) playActive();
         return;
       }
-      // Prefetch not ready (rapid swipes / startup) — slide to an empty panel,
+      // Prefetch not ready (rapid advances / startup) — slide to an empty panel,
       // then pick and load into it.
       await runSlide('forward');
       const old = active;
@@ -591,80 +591,36 @@
     else document.documentElement.requestFullscreen().catch(() => {});
   }
 
-  // --- Gestures ---
-  const SWIPE_THRESHOLD = 60;
-  const TAP_MAX_DIST = 10;
-  const TAP_MAX_MS = 300;
+  // --- Taps (the only touch interaction the player handles itself) ---
+  // Drags are left to the browser on purpose: iPhone Safari has no fullscreen
+  // API, so the only way to lose its toolbar is a real page scroll. The root
+  // allows vertical panning and a spacer below keeps the document scrollable
+  // by at least the toolbar's height, so a swipe up tucks the bar away and the
+  // fixed player grows into the space. Browsers don't fire click after a
+  // scroll, so taps and scrolls never collide.
 
-  let gesture = $state<{ id: number; x: number; y: number; t: number } | null>(null);
-
-  // Sampled before pointerdown wakes the HUD, so a tap on a clean screen
+  // Sampled on pointerdown before the HUD wakes, so a tap on a clean screen
   // reveals the info overlay first and only a second tap toggles play.
   let hudVisibleAtTapStart = false;
 
-  function onPointerDown(e: PointerEvent) {
-    if (gesture || animating) return;
-    gesture = { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now() };
+  function onSurfacePointerDown() {
     hudVisibleAtTapStart = hudVisible;
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     wakeControls();
   }
 
-  function onPointerMove(e: PointerEvent) {
-    if (!gesture || e.pointerId !== gesture.id) return;
-    const dx = e.clientX - gesture.x;
-    const dy = e.clientY - gesture.y;
-    if (Math.abs(dx) > Math.abs(dy)) {
-      // Rubber-band when there's nothing to go back to.
-      offsetX = dx > 0 && cursor <= 0 ? dx * 0.25 : dx;
-    } else {
-      offsetX = 0;
-    }
+  function onSurfaceClick(e: MouseEvent) {
+    if (animating) return;
+    handleTap(e.clientX);
   }
 
-  function onPointerUp(e: PointerEvent) {
-    if (!gesture || e.pointerId !== gesture.id) return;
-    const dx = e.clientX - gesture.x;
-    const dy = e.clientY - gesture.y;
-    const dt = performance.now() - gesture.t;
-    gesture = null;
-    resolveGesture(dx, dy, dt, e.clientX);
-  }
-
-  function onPointerCancel(e: PointerEvent) {
-    if (gesture && e.pointerId === gesture.id) {
-      gesture = null;
-      offsetX = 0;
-    }
-  }
-
-  // The finger moves the content: dragging LEFT advances to the new video
-  // sitting "on the right", dragging UP moves down to the next scene — the
-  // usual shorts convention. Flip the four calls here if it feels inverted.
-  function resolveGesture(dx: number, dy: number, dt: number, x: number) {
-    const ax = Math.abs(dx);
-    const ay = Math.abs(dy);
-    if (ax < TAP_MAX_DIST && ay < TAP_MAX_DIST) {
-      offsetX = 0;
-      if (dt < TAP_MAX_MS) handleTap(x);
-      return;
-    }
-    if (ax >= ay) {
-      if (ax < SWIPE_THRESHOLD) {
-        offsetX = 0;
-        return;
-      }
-      // advanceForward/goBack animate from the current drag offset, or snap
-      // the panels back themselves when they can't run.
-      if (dx < 0) advanceForward();
-      else goBack();
-    } else {
-      offsetX = 0;
-      if (ay < SWIPE_THRESHOLD) return;
-      if (dy < 0) nextScene();
-      else prevScene();
-    }
-  }
+  // While the player is open the document scrolls only to move the browser
+  // toolbar, so park the listing at the top (giving that scroll room) and put
+  // it back where it was on exit.
+  $effect(() => {
+    const savedY = window.scrollY;
+    window.scrollTo(0, 0);
+    return () => window.scrollTo(0, savedY);
+  });
 
   function onKeyDown(e: KeyboardEvent) {
     switch (e.key) {
@@ -746,7 +702,7 @@
   }
 
   const panelTransition = $derived(
-    gesture || resetting ? '' : 'transition-transform duration-300 ease-out'
+    resetting ? '' : 'transition-transform duration-300 ease-out'
   );
 </script>
 
@@ -754,11 +710,11 @@
 
 <div
   class="fixed inset-0 z-50 bg-black text-gray-100 overflow-hidden select-none"
-  style="touch-action: none; overscroll-behavior: contain;"
+  style="touch-action: pan-y;"
   role="presentation"
   onmousemove={wakeControls}
 >
-  <!-- Previous entry peeking in from the left on a back drag -->
+  <!-- Previous entry peeking in from the left while sliding back -->
   {#if prevEntry}
     <div
       class="absolute inset-0 {panelTransition}"
@@ -836,14 +792,13 @@
     </div>
   {/if}
 
-  <!-- Gesture surface -->
+  <!-- Tap surface: single tap wakes the HUD / toggles play, double tap skips.
+       Vertical drags pass through to the browser (see the tap section). -->
   <div
     class="absolute inset-0 z-10"
     role="presentation"
-    onpointerdown={onPointerDown}
-    onpointermove={onPointerMove}
-    onpointerup={onPointerUp}
-    onpointercancel={onPointerCancel}
+    onpointerdown={onSurfacePointerDown}
+    onclick={onSurfaceClick}
   ></div>
 
   {#if skipFlash}
@@ -939,7 +894,7 @@
     </button>
   </div>
 
-  <!-- Nav fallback buttons (desktop / no-gesture) -->
+  <!-- Navigation: the only way to move between videos and scenes -->
   <div
     class="absolute right-3 top-1/2 -translate-y-1/2 z-20 flex flex-col gap-2 transition-opacity duration-300 {hudVisible
       ? 'opacity-100'
@@ -986,3 +941,11 @@
     </button>
   </div>
 </div>
+
+<!-- Scroll room: keeps the document at least a toolbar taller than the small
+     viewport, so a swipe on the player can always collapse the browser bar. -->
+<div
+  class="absolute top-0 left-0 w-px pointer-events-none"
+  style="height: calc(100lvh + 1px);"
+  aria-hidden="true"
+></div>
