@@ -52,7 +52,9 @@ The router exposes a reactive `router.current` and a `navigate()` helper. `App.s
 
 ### Streaming
 
-`src/lib/stream.ts` registers a Service Worker (`public/sw.js`) and assigns each play session a random ID. The Service Worker intercepts requests to `/__mega_stream/<sessionId>`, asks the page (via `postMessage`) for the requested byte range, and the page calls `node.download({ start, end })` and streams chunks back. This sidesteps the need to materialize the full encrypted blob and gives the `<video>` element first-class range support.
+`src/lib/stream.ts` registers a Service Worker (`public/sw.js`) and assigns each play session a random ID. At registration the page hands the worker the node's unmerged AES-CTR key + nonce and a MEGA download URL (the same `g` API call megajs makes). The worker intercepts requests to `/__mega_stream/<sessionId>`, fetches the ciphertext range straight from the MEGA CDN as one streaming request, decrypts it with WebCrypto AES-CTR as it flows through, and answers with a bounded 206 window. Bytes never pass through the page, cancel aborts the CDN fetch, and the response stream's backpressure reaches TCP flow control. Expired download URLs are refreshed via the page; transient failures resume from the last delivered byte.
+
+If the page can't provide key/URL, the worker falls back to asking the page for the range, which streams it through `node.download({ start, end, maxConnections: 1 })`.
 
 ### File attributes (FA)
 

@@ -5,6 +5,10 @@ interface MegaFileLike {
   // the size is absent
   size?: number;
   name?: string | null;
+  nodeId?: string;
+  key?: Uint8Array | null;
+  // megajs's own types declare the request body as the global JSON type
+  api?: { request(json: any): Promise<any> };
   download(opts: {
     start: number;
     end: number;
@@ -22,9 +26,17 @@ interface FetchRangeMessage {
   end: number;
 }
 
+// What the service worker needs to pull ciphertext off the MEGA CDN and
+// decrypt it itself, without routing bytes through the page.
+interface DirectInfo {
+  aesKey: ArrayBuffer;
+  nonce: ArrayBuffer;
+  url: string;
+}
+
 interface SessionEntry {
   node: MegaFileLike;
-  maxConnections: number;
+  direct: DirectInfo | null;
 }
 
 const activeSessions = new Map<string, SessionEntry>();
@@ -70,14 +82,65 @@ function installMessageHandler() {
   navigator.serviceWorker.addEventListener('message', (event) => {
     const data = event.data;
     if (!data) return;
+    if (data.type === 'stream-error') {
+      showStreamErrorToast('Streaming failed', new Error(data.message || 'Stream error'));
+      return;
+    }
     const port = event.ports[0];
     if (!port) return;
     if (data.type === 'fetch-range') {
       handleFetchRange(data as FetchRangeMessage, port);
     } else if (data.type === 'resolve-session') {
       handleResolveSession(data.sessionId, port);
+    } else if (data.type === 'refresh-url') {
+      handleRefreshUrl(data.sessionId, port);
     }
   });
+}
+
+// --- Direct-mode key material -------------------------------------------
+
+// A MEGA file key is 32 bytes: the AES key XORed with the MAC in the first
+// half, and nonce (8 bytes) + MAC in the second. The service worker only needs
+// the unmerged AES key and the nonce.
+function deriveDirectKeys(key: Uint8Array | null | undefined): { aesKey: ArrayBuffer; nonce: ArrayBuffer } | null {
+  if (!key || key.length < 32) return null;
+  const aes = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) aes[i] = key[i] ^ key[16 + i];
+  const nonce = new Uint8Array(8);
+  nonce.set(key.subarray(16, 24));
+  return { aesKey: aes.buffer, nonce: nonce.buffer };
+}
+
+// Same `g` call megajs makes at the top of node.download(): returns a CDN URL
+// that accepts `/<start>-<end>` byte ranges. Valid for a while, then 403s.
+async function fetchDownloadUrl(node: MegaFileLike): Promise<string | null> {
+  if (!node.api || !node.nodeId) return null;
+  const ssl = typeof window !== 'undefined' && window.isSecureContext ? 2 : 0;
+  const res = await node.api.request({ a: 'g', g: 1, ssl, n: node.nodeId });
+  if (!res || typeof res.g !== 'string' || !res.g.startsWith('http')) return null;
+  return res.g as string;
+}
+
+async function buildDirectInfo(node: MegaFileLike): Promise<DirectInfo | null> {
+  const keys = deriveDirectKeys(node.key);
+  if (!keys) return null;
+  try {
+    const url = await fetchDownloadUrl(node);
+    if (!url) return null;
+    return { ...keys, url };
+  } catch (err) {
+    console.warn('Direct streaming unavailable, falling back to page-side download:', err);
+    return null;
+  }
+}
+
+function sessionInfo(session: SessionEntry) {
+  return {
+    size: session.node.size,
+    mimeType: getMimeType(session.node.name || ''),
+    direct: session.direct,
+  };
 }
 
 // A restarted service worker (idle-killed, empty session map) asks pages to
@@ -85,17 +148,30 @@ function installMessageHandler() {
 function handleResolveSession(sessionId: string, port: MessagePort) {
   const session = activeSessions.get(sessionId);
   if (session && typeof session.node.size === 'number') {
-    safePost(port, {
-      type: 'session-info',
-      found: true,
-      size: session.node.size,
-      mimeType: getMimeType(session.node.name || ''),
-    });
+    safePost(port, { type: 'session-info', found: true, ...sessionInfo(session) });
   } else {
     safePost(port, { type: 'session-info', found: false });
   }
   safeClose(port);
 }
+
+// The CDN rejected the download URL (expired); mint a new one.
+async function handleRefreshUrl(sessionId: string, port: MessagePort) {
+  const session = activeSessions.get(sessionId);
+  let url: string | null = null;
+  if (session) {
+    try {
+      url = await fetchDownloadUrl(session.node);
+    } catch (err) {
+      console.warn('Refreshing MEGA download URL failed:', err);
+    }
+    if (url && session.direct) session.direct.url = url;
+  }
+  safePost(port, { type: 'url', url });
+  safeClose(port);
+}
+
+// --- Fallback: page-side megajs download ----------------------------------
 
 const RANGE_RETRIES = 3;
 
@@ -146,17 +222,14 @@ function handleFetchRange(req: FetchRangeMessage, port: MessagePort) {
   const startStream = () => {
     if (cancelled) return;
     try {
+      // maxConnections: 1 is the only megajs path that streams the response
+      // body as it arrives (the multi-connection path buffers each whole
+      // chunk before emitting it, and never aborts in-flight chunks on
+      // destroy). One CDN connection is plenty for video bitrates.
       stream = session.node.download({
         start: req.start + sent,
         end: req.end,
-        maxConnections: session.maxConnections,
-        // megajs defaults ramp chunks 128KB→1MB, which means 10+ CDN round
-        // trips per window — painful on high-RTT mobile links. Start small so
-        // seeks show a frame fast, but grow to much larger chunks; the cost is
-        // a bigger retry unit when a chunk fails.
-        initialChunkSize: 256 * 1024,
-        chunkSizeIncrement: 512 * 1024,
-        maxChunkSize: 4 * 1024 * 1024,
+        maxConnections: 1,
       });
     } catch (err: any) {
       fail(err);
@@ -233,7 +306,9 @@ function getMimeType(name: string): string {
 
 export async function createStreamUrl(
   node: MegaFileLike,
-  opts: { maxConnections?: number } = {}
+  // Kept for callers; the service worker streams over a single CDN connection
+  // now, so the connection count no longer applies.
+  _opts: { maxConnections?: number } = {}
 ): Promise<{ url: string; cleanup: () => void }> {
   await ensureServiceWorker();
   const controller = navigator.serviceWorker.controller;
@@ -248,7 +323,8 @@ export async function createStreamUrl(
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-  activeSessions.set(sessionId, { node, maxConnections: opts.maxConnections ?? 4 });
+  const session: SessionEntry = { node, direct: await buildDirectInfo(node) };
+  activeSessions.set(sessionId, session);
   await new Promise<void>((resolve, reject) => {
     const channel = new MessageChannel();
     const timer = setTimeout(() => {
@@ -265,8 +341,7 @@ export async function createStreamUrl(
     controller.postMessage({
       type: 'register-session',
       sessionId,
-      size: node.size,
-      mimeType: getMimeType(node.name || ''),
+      ...sessionInfo(session),
     }, [channel.port2]);
   });
 
