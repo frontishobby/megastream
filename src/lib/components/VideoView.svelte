@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowLeft, StickyNote, Pencil, Check, X, Loader2, Film, RefreshCw, Download, FolderInput, Folder } from '@lucide/svelte';
+  import { ArrowLeft, StickyNote, Pencil, Check, X, Loader2, Film, RefreshCw, Download, FolderInput, Folder, ImageUp } from '@lucide/svelte';
   import { untrack } from 'svelte';
   import type { MegaNode } from '../mega';
   import { MegaService } from '../mega';
@@ -12,7 +12,7 @@
     type Scene,
     type SceneData,
   } from '../scenes';
-  import { resolveSceneAnalysisMode } from '../labeler';
+  import { resolveSceneAnalysisMode, probeLabeler, labelerUrl } from '../labeler';
   import { THUMB_FOLDER, saveThumbnailFrame } from '../thumbnails';
   import type { Storage, MutableFile, File as MegaFile } from 'megajs';
   import { showToast } from '../toast.svelte';
@@ -424,6 +424,63 @@
     }
   }
 
+  let thumbRegenerating = $state<{ processed: number; duration: number } | null>(null);
+  const thumbPct = $derived(
+    thumbRegenerating && thumbRegenerating.duration > 0
+      ? Math.min(100, Math.round((thumbRegenerating.processed / thumbRegenerating.duration) * 100))
+      : 0
+  );
+
+  /**
+   * Re-picks the thumbnail with the same rule the labelled scene scan uses:
+   * sweep the video through the labeler and keep the frame where the
+   * performer's face and body score best. Scenes on disk are left alone.
+   */
+  async function handleRegenerateThumbnail() {
+    if (thumbRegenerating || detecting) return;
+    const storage = (node.node as unknown as { storage?: Storage }).storage;
+    if (!storage) {
+      showToast('Cannot regenerate thumbnail: storage unavailable');
+      return;
+    }
+    if (isTransportStream(node.name)) {
+      showToast('Thumbnails are not supported for MPEG-TS files');
+      return;
+    }
+    if (!(await probeLabeler())) {
+      showToast(`Scene labeler is not reachable at ${labelerUrl()}`);
+      return;
+    }
+    thumbRegenerating = { processed: 0, duration: 0 };
+    // Same reason as the scene scan: don't compete with the player's stream.
+    const player = videoEl;
+    const wasPlaying = !!player && !player.paused && !player.ended;
+    try {
+      player?.pause();
+    } catch (_) {}
+    try {
+      const { thumb } = await detectScenesFromNode(node.node, {
+        withLabels: true,
+        onProgress: (processed, dur) => {
+          thumbRegenerating = { processed, duration: dur };
+        },
+      });
+      if (!thumb) {
+        showToast('No frame with a visible face found — thumbnail unchanged');
+        return;
+      }
+      await saveThumbnailFrame(storage, node.id, thumb.blob);
+      showToast(`Thumbnail updated (frame @ ${formatDuration(thumb.t)})`);
+    } catch (err) {
+      showToast(
+        `Thumbnail regeneration failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+    } finally {
+      thumbRegenerating = null;
+      if (wasPlaying) player?.play().catch(() => {});
+    }
+  }
+
   function nameKey(e: KeyboardEvent) {
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -615,6 +672,21 @@
             aria-label="Move to folder"
           >
             <FolderInput size={16} />
+          </button>
+          <button
+            type="button"
+            onclick={handleRegenerateThumbnail}
+            disabled={!!thumbRegenerating || !!detecting}
+            class="inline-flex items-center gap-1 text-gray-500 hover:text-gray-200 p-1 rounded shrink-0 opacity-60 group-hover:opacity-100 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+            title="Regenerate thumbnail (face-visible frame via labeler)"
+            aria-label="Regenerate thumbnail"
+          >
+            {#if thumbRegenerating}
+              <Loader2 size={16} class="animate-spin" />
+              <span class="text-xs tabular-nums">{thumbPct}%</span>
+            {:else}
+              <ImageUp size={16} />
+            {/if}
           </button>
           <button
             type="button"
