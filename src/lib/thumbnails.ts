@@ -296,6 +296,30 @@ export function uploadBytes(folder: MutableFile, name: string, bytes: Uint8Array
   return stream.complete.then(() => undefined);
 }
 
+async function storeThumbnail(
+  storage: Storage,
+  videoId: string,
+  ext: ThumbExt,
+  bytes: Uint8Array,
+  dataUrl: string
+): Promise<void> {
+  const folder = await ensureThumbFolder(storage);
+  const names = THUMB_EXTS.map((e) => thumbFileName(videoId, e));
+  const stale = ((folder.children || []) as MutableFile[]).filter(
+    (c) => !c.directory && names.includes(c.name || '')
+  );
+  for (const f of stale) {
+    try {
+      await f.delete(true);
+    } catch (err) {
+      console.warn('Failed to remove stale thumbnail', err);
+    }
+  }
+  await uploadBytes(folder, thumbFileName(videoId, ext), bytes);
+  await setCached(videoId, dataUrl);
+  thumbnailEvents.dispatchEvent(new CustomEvent('thumbnail', { detail: videoId }));
+}
+
 /**
  * Stores a frame captured during an AI scene scan as the video's thumbnail,
  * replacing any previously generated one — the scan picks a frame where the
@@ -307,22 +331,27 @@ export async function saveThumbnailFrame(
   videoId: string,
   blob: Blob
 ): Promise<void> {
-  const folder = await ensureThumbFolder(storage);
-  const names = THUMB_EXTS.map((ext) => thumbFileName(videoId, ext));
-  const stale = ((folder.children || []) as MutableFile[]).filter(
-    (c) => !c.directory && names.includes(c.name || '')
-  );
-  for (const f of stale) {
-    try {
-      await f.delete(true);
-    } catch (err) {
-      console.warn('Failed to remove stale thumbnail', err);
-    }
-  }
   const bytes = new Uint8Array(await blob.arrayBuffer());
-  await uploadBytes(folder, thumbFileName(videoId, 'jpg'), bytes);
-  await setCached(videoId, await blobToDataUrl(blob));
-  thumbnailEvents.dispatchEvent(new CustomEvent('thumbnail', { detail: videoId }));
+  await storeThumbnail(storage, videoId, 'jpg', bytes, await blobToDataUrl(blob));
+}
+
+/**
+ * Regenerates one video's thumbnail with the plain midpoint grab, replacing
+ * whatever is stored.
+ */
+export async function regenerateThumbnail(
+  storage: Storage,
+  videoId: string,
+  node: MegaFileLike
+): Promise<void> {
+  await sem.acquire();
+  let frame: CapturedFrame;
+  try {
+    frame = await captureFrame(node);
+  } finally {
+    sem.release();
+  }
+  await storeThumbnail(storage, videoId, frame.ext, dataUrlToBytes(frame.dataUrl), frame.dataUrl);
 }
 
 /**
