@@ -9,6 +9,8 @@ export interface MegaNode {
   memo?: string;
   /** Video-level descriptive tags mirrored from scene analysis (_tags). */
   tags?: string[];
+  /** MEGA upload time, seconds since epoch. Missing on some shared nodes. */
+  timestamp?: number;
   node: File;
 }
 
@@ -46,6 +48,7 @@ export class MegaService {
       id: fileId(child),
       memo: readMemo(child),
       tags: readTags(child),
+      timestamp: child.timestamp,
       node: child,
     }));
   }

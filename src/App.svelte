@@ -143,7 +143,13 @@
   // Subfolders of the open folder — used for the compact strip shown where the
   // sidebar is hidden (narrow screens).
   const folderNodes = $derived(nodes.filter((n) => n.type === 'folder'));
-  const fileNodes = $derived(nodes.filter((n) => n.type === 'file'));
+  // Newest upload first. `filter` already returns a fresh array, and sort is
+  // stable, so nodes without a MEGA timestamp keep their tree order at the end.
+  const fileNodes = $derived(
+    nodes
+      .filter((n) => n.type === 'file')
+      .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
+  );
 
   // Tag filter: chips built from the current folder's video tags; selecting
   // several narrows to videos carrying all of them.
