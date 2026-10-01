@@ -20,7 +20,7 @@
     subtitleEvents,
     subtitleJobs,
     subtitleLangLabel,
-    type SubtitleStage,
+    subtitleStageLabel,
   } from '../subtitles.svelte';
   import { THUMB_FOLDER, saveThumbnailFrame, regenerateThumbnail } from '../thumbnails';
   import type { Storage, MutableFile, File as MegaFile } from 'megajs';
@@ -214,15 +214,6 @@
       for (const t of tracks) t.mode = t === pick ? 'showing' : 'disabled';
     });
   });
-
-  const STAGE_LABELS: Record<SubtitleStage, string> = {
-    upload: 'Sending',
-    queued: 'Queued',
-    loading: 'Loading model',
-    transcribing: 'Transcribing',
-    translating: 'Translating',
-    saving: 'Saving',
-  };
 
   async function handleGenerateSubtitles() {
     if (subtitleJob) return;
@@ -806,13 +797,7 @@
           >
             {#if subtitleJob}
               <Loader2 size={16} class="animate-spin" />
-              <span class="text-xs whitespace-nowrap">
-                {STAGE_LABELS[subtitleJob.stage]}{subtitleJob.stage === 'queued' ||
-                subtitleJob.stage === 'loading' ||
-                subtitleJob.stage === 'saving'
-                  ? '…'
-                  : ` ${Math.round(subtitleJob.progress * 100)}%`}
-              </span>
+              <span class="text-xs whitespace-nowrap">{subtitleStageLabel(subtitleJob)}</span>
             {:else}
               <Captions size={16} />
             {/if}

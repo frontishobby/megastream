@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { RefreshCw, Captions } from '@lucide/svelte';
-  import { fetchLabelerHealth, labelerUrl, type LabelerHealth } from '../labeler';
+  import { labelerUrl } from '../labeler';
+  import { labelerHealth, refreshLabelerHealth } from '../labelerHealth.svelte';
   import {
     SUBTITLE_LANGS,
     loadSubtitleSettings,
@@ -9,26 +10,17 @@
     type SubtitleSettings,
   } from '../subtitles.svelte';
 
-  // undefined = probe in flight (first check), null = offline.
-  let health = $state<LabelerHealth | null | undefined>(undefined);
-  let checking = $state(false);
+  const health = $derived(labelerHealth.value);
+  const checking = $derived(labelerHealth.checking);
   let open = $state(false);
   let rootEl: HTMLDivElement | undefined = $state();
   let settings = $state<SubtitleSettings>(loadSubtitleSettings());
 
   const online = $derived(health === undefined ? null : health !== null);
 
-  async function check() {
-    if (checking) return;
-    checking = true;
-    try {
-      health = await fetchLabelerHealth();
-    } finally {
-      checking = false;
-    }
-  }
+  const check = refreshLabelerHealth;
 
-  // onMount, not $effect: check() reads/writes the state above, and inside
+  // onMount, not $effect: check() reads/writes the shared state, and inside
   // an $effect those reads become dependencies — every probe would re-run
   // the effect and spam /health in a loop.
   onMount(() => {

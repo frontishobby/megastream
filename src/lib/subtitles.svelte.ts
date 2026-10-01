@@ -107,7 +107,7 @@ export async function getStoredSubtitles(
   return out;
 }
 
-async function saveSubtitles(
+export async function saveSubtitles(
   storage: Storage,
   videoId: string,
   tracks: StoredSubtitle[]
@@ -152,6 +152,23 @@ export interface SubtitleJob {
   progress: number;
 }
 
+const STAGE_LABELS: Record<SubtitleStage, string> = {
+  upload: 'Sending',
+  queued: 'Queued',
+  loading: 'Loading model',
+  transcribing: 'Transcribing',
+  translating: 'Translating',
+  saving: 'Saving',
+};
+
+/** e.g. "Transcribing 42%", or "Queued…" for stages without progress. */
+export function subtitleStageLabel(job: SubtitleJob): string {
+  const label = STAGE_LABELS[job.stage];
+  return job.stage === 'queued' || job.stage === 'loading' || job.stage === 'saving'
+    ? `${label}…`
+    : `${label} ${Math.round(job.progress * 100)}%`;
+}
+
 /** Running jobs keyed by video id, so a view can pick up a job it didn't start. */
 export const subtitleJobs = $state<Record<string, SubtitleJob>>({});
 
@@ -180,6 +197,7 @@ const POLL_MS = 2000;
 // A restarted or crashed server loses its jobs; give up after this many
 // consecutive failed polls (~30s) instead of spinning forever.
 const MAX_POLL_FAILURES = 15;
+const FILE_CHUNK = 64 * 1024 * 1024;
 
 async function withRetries<T>(what: string, fn: () => Promise<T>): Promise<T> {
   for (let attempt = 1; ; attempt++) {
@@ -203,7 +221,7 @@ async function readRange(url: string, offset: number): Promise<ArrayBuffer> {
   return buf;
 }
 
-async function sendChunk(base: string, jobId: string, offset: number, data: ArrayBuffer) {
+async function sendChunk(base: string, jobId: string, offset: number, data: BodyInit) {
   const res = await fetch(`${base}/subtitles/jobs/${jobId}/data?offset=${offset}`, {
     method: 'PUT',
     body: data,
@@ -215,11 +233,13 @@ async function sendChunk(base: string, jobId: string, offset: number, data: Arra
 async function pollUntilDone(
   base: string,
   jobId: string,
-  job: SubtitleJob
+  job: SubtitleJob,
+  signal?: AbortSignal
 ): Promise<ServerStatus> {
   let failures = 0;
   for (;;) {
     await new Promise((r) => setTimeout(r, POLL_MS));
+    signal?.throwIfAborted();
     let status: ServerStatus;
     try {
       const res = await fetch(`${base}/subtitles/jobs/${jobId}`);
@@ -244,6 +264,56 @@ async function pollUntilDone(
 export interface SubtitleResult {
   tracks: StoredSubtitle[];
   warning: string | null;
+}
+
+/** Hands the video to the server: `send` uploads one chunk at `offset`. */
+type Feed = (send: (offset: number, data: BodyInit) => Promise<void>) => Promise<void>;
+
+/**
+ * Creates one server job, feeds it the video (unless it's translation-only),
+ * and waits for the tracks. The server job is always deleted afterwards,
+ * which also cancels it when we bail out early.
+ */
+async function runServerJob(
+  body: object,
+  feed: Feed | null,
+  job: SubtitleJob,
+  signal?: AbortSignal
+): Promise<SubtitleResult> {
+  const base = labelerUrl();
+  let jobId: string | null = null;
+  try {
+    const created = await fetch(`${base}/subtitles/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (created.status === 404) {
+      throw new Error('Scene AI server is outdated — restart run.bat to update it');
+    }
+    if (!created.ok) throw new Error(`Scene AI refused the job (HTTP ${created.status})`);
+    const id = (await created.json()).id as string;
+    jobId = id;
+
+    if (feed) {
+      await feed((offset, data) => {
+        signal?.throwIfAborted();
+        return withRetries('Chunk upload', () => sendChunk(base, id, offset, data));
+      });
+      signal?.throwIfAborted();
+      const started = await fetch(`${base}/subtitles/jobs/${id}/start`, { method: 'POST' });
+      if (!started.ok) throw new Error(`Scene AI could not start the job (HTTP ${started.status})`);
+      job.stage = 'queued';
+      job.progress = 0;
+    }
+
+    const status = await pollUntilDone(base, id, job, signal);
+    const tracks = (status.tracks ?? []).map((t) => ({ lang: t.lang, vtt: t.vtt }));
+    if (tracks.length === 0) throw new Error('Scene AI returned no subtitles');
+    return { tracks, warning: status.warning };
+  } finally {
+    if (jobId) fetch(`${base}/subtitles/jobs/${jobId}`, { method: 'DELETE' }).catch(() => {});
+  }
 }
 
 /**
@@ -275,62 +345,66 @@ export async function generateSubtitles(
   subtitleJobs[videoId] = { stage: translateOnly ? 'queued' : 'upload', progress: 0 };
   // Read back through the store so progress writes hit the reactive proxy.
   const job = subtitleJobs[videoId];
-  const base = labelerUrl();
-  let jobId: string | null = null;
   try {
-    const created = await fetch(`${base}/subtitles/jobs`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(
-        translateOnly
-          ? { source: original!.lang, target: settings.target, vtt: original!.vtt }
-          : { source: settings.source, target: settings.target }
-      ),
-    });
-    if (created.status === 404) {
-      throw new Error('Scene AI server is outdated — restart run.bat to update it');
-    }
-    if (!created.ok) throw new Error(`Scene AI refused the job (HTTP ${created.status})`);
-    jobId = (await created.json()).id as string;
-
-    if (!translateOnly) {
-      opts.onTransferStart?.();
-      try {
-        const { url, cleanup } = await createStreamUrl(node);
-        try {
-          let offset = 0;
-          while (offset < size) {
-            const at = offset;
-            const chunk = await withRetries('Stream read', () => readRange(url, at));
-            await withRetries('Chunk upload', () => sendChunk(base, jobId!, at, chunk));
-            offset += chunk.byteLength;
-            job.progress = offset / size;
+    const feed: Feed | null = translateOnly
+      ? null
+      : async (send) => {
+          opts.onTransferStart?.();
+          try {
+            const { url, cleanup } = await createStreamUrl(node);
+            try {
+              let offset = 0;
+              while (offset < size) {
+                const at = offset;
+                const chunk = await withRetries('Stream read', () => readRange(url, at));
+                await send(at, chunk);
+                offset += chunk.byteLength;
+                job.progress = offset / size;
+              }
+            } finally {
+              cleanup();
+            }
+          } finally {
+            opts.onTransferEnd?.();
           }
-        } finally {
-          cleanup();
-        }
-      } finally {
-        opts.onTransferEnd?.();
-      }
-
-      const started = await fetch(`${base}/subtitles/jobs/${jobId}/start`, { method: 'POST' });
-      if (!started.ok) throw new Error(`Scene AI could not start the job (HTTP ${started.status})`);
-      job.stage = 'queued';
-      job.progress = 0;
-    }
-
-    const status = await pollUntilDone(base, jobId, job);
-    const tracks = (status.tracks ?? []).map((t) => ({ lang: t.lang, vtt: t.vtt }));
-    if (tracks.length === 0) throw new Error('Scene AI returned no subtitles');
+        };
+    const result = await runServerJob(
+      translateOnly
+        ? { source: original!.lang, target: settings.target, vtt: original!.vtt }
+        : { source: settings.source, target: settings.target },
+      feed,
+      job
+    );
     job.stage = 'saving';
     job.progress = 0;
-    await saveSubtitles(storage, videoId, tracks);
-    return { tracks, warning: status.warning };
+    await saveSubtitles(storage, videoId, result.tracks);
+    return result;
   } finally {
-    if (jobId) {
-      // Also cancels the server-side job when we bailed out early.
-      fetch(`${base}/subtitles/jobs/${jobId}`, { method: 'DELETE' }).catch(() => {});
-    }
     delete subtitleJobs[videoId];
   }
+}
+
+/**
+ * Transcribes (and translates, per the current settings) a local file —
+ * used while uploading, so nothing has to come back down from MEGA. Doesn't
+ * save; the caller stores the tracks once the upload has a node id.
+ */
+export function transcribeLocalFile(
+  file: File,
+  job: SubtitleJob,
+  signal?: AbortSignal
+): Promise<SubtitleResult> {
+  const settings = loadSubtitleSettings();
+  return runServerJob(
+    { source: settings.source, target: settings.target },
+    async (send) => {
+      for (let offset = 0; offset < file.size; offset += FILE_CHUNK) {
+        // Blob bodies stream straight from disk; the file never sits in memory.
+        await send(offset, file.slice(offset, offset + FILE_CHUNK));
+        job.progress = Math.min(1, (offset + FILE_CHUNK) / file.size);
+      }
+    },
+    job,
+    signal
+  );
 }

@@ -5,8 +5,28 @@ import { detectScenesFromFile, saveScenes, type SceneScanResult } from './scenes
 import { saveThumbnailFrame } from './thumbnails';
 import { generateStripFromFile, saveStrip } from './strips';
 import type { SceneAnalysisMode } from './labeler';
+import {
+  saveSubtitles,
+  transcribeLocalFile,
+  type SubtitleJob,
+  type SubtitleResult,
+} from './subtitles.svelte';
+import { showToast } from './toast.svelte';
 
-export type UploadStatus = 'queued' | 'uploading' | 'analyzing' | 'done' | 'error' | 'cancelled';
+export type UploadStatus =
+  | 'queued'
+  | 'uploading'
+  | 'analyzing'
+  | 'subtitling'
+  | 'done'
+  | 'error'
+  | 'cancelled';
+
+export interface UploadSubtitles extends SubtitleJob {
+  /** Tracks are back from Scene AI and wait for the upload to finish. */
+  ready: boolean;
+  error?: string;
+}
 
 export interface UploadJob {
   id: string;
@@ -18,6 +38,10 @@ export interface UploadJob {
   folderId: string;
   /** Scene-scan progress 0-100; null until the scan reports anything. */
   analysisPct: number | null;
+  /** Whether subtitles can be requested for this file at all. */
+  canSubtitle: boolean;
+  /** Subtitle generation requested from the panel; null when not requested. */
+  subtitles: UploadSubtitles | null;
 }
 
 const MAX_CONCURRENT = 3;
@@ -32,6 +56,13 @@ const queue: Array<{
   sceneMode: SceneAnalysisMode;
 }> = [];
 const cancellers = new Map<string, () => void>();
+// Local files of jobs that haven't finished uploading — subtitles requested
+// mid-upload transcribe from these instead of downloading from MEGA again.
+const activeFiles = new Map<string, File>();
+const subtitleRuns = new Map<
+  string,
+  { promise: Promise<SubtitleResult>; abort: AbortController }
+>();
 
 export const uploads = {
   get jobs(): UploadJob[] {
@@ -60,8 +91,11 @@ export function enqueueUpload(
     status: 'queued',
     folderId: folder.nodeId || '',
     analysisPct: null,
+    canSubtitle: MegaService.isVideo(file.name) && !isTransportStream(file.name),
+    subtitles: null,
   };
   _jobs.push(job);
+  activeFiles.set(id, file);
   queue.push({ id, file, folder, sceneMode });
   drain();
   return findJob(id) ?? job;
@@ -71,13 +105,91 @@ export function clearFinishedUploads() {
   _jobs = _jobs.filter((j) => j.status === 'queued' || j.status === 'uploading');
 }
 
+/**
+ * Transcribes (and translates, per the Scene AI settings) an upload once it
+ * lands. Transcription starts right away from the local file and runs
+ * alongside the MEGA upload; the tracks are saved when the upload is done.
+ */
+export function requestUploadSubtitles(jobId: string) {
+  const job = findJob(jobId);
+  const file = activeFiles.get(jobId);
+  if (!job || !file || !job.canSubtitle || job.subtitles) return;
+  if (job.status !== 'queued' && job.status !== 'uploading' && job.status !== 'analyzing') return;
+  job.subtitles = { stage: 'upload', progress: 0, ready: false };
+  const progress = job.subtitles; // the reactive proxy, not the literal
+  const abort = new AbortController();
+  const promise = transcribeLocalFile(file, progress, abort.signal);
+  promise.then(
+    () => (progress.ready = true),
+    () => {} // reported once the upload is done, by finishSubtitles
+  );
+  subtitleRuns.set(jobId, { promise, abort });
+}
+
+function abortSubtitles(jobId: string) {
+  subtitleRuns.get(jobId)?.abort.abort();
+  subtitleRuns.delete(jobId);
+}
+
+export function cancelUploadSubtitles(jobId: string) {
+  const job = findJob(jobId);
+  // Once the upload is through, finishSubtitles owns the run and wraps up.
+  if (job?.status === 'subtitling') {
+    subtitleRuns.get(jobId)?.abort.abort();
+    return;
+  }
+  abortSubtitles(jobId);
+  if (job) job.subtitles = null;
+}
+
+async function finishSubtitles(
+  id: string,
+  run: { promise: Promise<SubtitleResult>; abort: AbortController },
+  storage: Storage | undefined,
+  videoId: string | undefined
+) {
+  let failed = false;
+  try {
+    const result = await run.promise;
+    if (!storage || !videoId) throw new Error('uploaded file is not available');
+    const sub = findJob(id)?.subtitles;
+    if (sub) {
+      sub.stage = 'saving';
+      sub.progress = 0;
+    }
+    await saveSubtitles(storage, videoId, result.tracks);
+    if (result.warning) showToast(result.warning, 'warning');
+  } catch (err) {
+    if (!run.abort.signal.aborted) {
+      failed = true;
+      const sub = findJob(id)?.subtitles;
+      if (sub) sub.error = err instanceof Error ? err.message : String(err);
+    }
+  } finally {
+    subtitleRuns.delete(id);
+    const job = findJob(id);
+    if (job) {
+      job.status = 'done';
+      // A failure stays listed so the error can be read.
+      if (!failed) scheduleAutoRemove(id);
+    }
+  }
+}
+
 export function cancelUpload(jobId: string) {
   const job = findJob(jobId);
   if (!job) return;
+  if (job.status === 'subtitling') {
+    cancelUploadSubtitles(jobId);
+    return;
+  }
   if (job.status === 'uploading' || job.status === 'queued' || job.status === 'analyzing') {
     // During 'analyzing' the upload itself already succeeded; cancelling
     // just skips the scene scan and the job still completes as 'done'.
-    if (job.status !== 'analyzing') job.status = 'cancelled';
+    if (job.status !== 'analyzing') {
+      job.status = 'cancelled';
+      abortSubtitles(jobId);
+    }
     cancellers.get(jobId)?.();
     cancellers.delete(jobId);
   }
@@ -98,11 +210,15 @@ function drain() {
     const next = queue.shift();
     if (!next) break;
     const job = findJob(next.id);
-    if (!job || job.status === 'cancelled') continue;
+    if (!job || job.status === 'cancelled') {
+      activeFiles.delete(next.id);
+      continue;
+    }
     running++;
     run(next.id, next.file, next.folder, next.sceneMode).finally(() => {
       running--;
       cancellers.delete(next.id);
+      activeFiles.delete(next.id);
       drain();
     });
   }
@@ -160,6 +276,7 @@ async function run(
           reader.cancel();
         } catch (_) {}
         analysisAbort?.abort();
+        abortSubtitles(id);
         scheduleAutoRemove(id);
         return;
       }
@@ -186,6 +303,8 @@ async function run(
     }
     uploadStream.end();
     const uploadedNode = (await uploadStream.complete) as MutableFile | undefined;
+    const storage = (folder as unknown as { storage?: Storage }).storage;
+    const videoId = (uploadedNode as unknown as { nodeId?: string } | undefined)?.nodeId;
 
     if (analysis) {
       const current = findJob(id);
@@ -193,8 +312,6 @@ async function run(
         current.status = 'analyzing';
         current.uploaded = current.size;
         const scan = await analysis;
-        const storage = (folder as unknown as { storage?: Storage }).storage;
-        const videoId = (uploadedNode as unknown as { nodeId?: string } | undefined)?.nodeId;
         if (scan && storage && videoId) {
           try {
             await saveScenes(storage, videoId, scan.data, uploadedNode);
@@ -222,6 +339,20 @@ async function run(
       }
     }
 
+    // Checked after the scan so a request made while it ran isn't missed.
+    const subtitleRun = subtitleRuns.get(id);
+    if (subtitleRun) {
+      const current = findJob(id);
+      if (current) {
+        current.status = 'subtitling';
+        current.uploaded = current.size;
+      }
+      // Detached: transcription can take minutes and shouldn't hold one of
+      // the upload slots.
+      void finishSubtitles(id, subtitleRun, storage, videoId);
+      return;
+    }
+
     const done = findJob(id);
     if (done) {
       done.status = 'done';
@@ -230,6 +361,7 @@ async function run(
     }
   } catch (err) {
     analysisAbort?.abort();
+    abortSubtitles(id);
     const failed = findJob(id);
     if (!failed) return;
     if (failed.status === 'cancelled') {
