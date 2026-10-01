@@ -247,19 +247,24 @@
     // Sending the file streams it from MEGA; pause the player meanwhile so
     // the two transfers don't trip MEGA's parallel-connection limit. The
     // server-side work afterwards doesn't touch MEGA, so playback can resume.
+    // Translation-only runs never download, so they never pause.
     const player = videoEl;
-    let resumePlayer = !!player && !player.paused && !player.ended;
+    let resumePlayer = false;
+    const pause = () => {
+      resumePlayer = !!player && !player.paused && !player.ended;
+      try {
+        player?.pause();
+      } catch (_) {}
+    };
     const resume = () => {
       // A view closed mid-job leaves a detached element; never start it.
       if (resumePlayer && player?.isConnected) player.play().catch(() => {});
       resumePlayer = false;
     };
     try {
-      player?.pause();
-    } catch (_) {}
-    try {
       const { tracks, warning } = await generateSubtitles(storage, node.id, node.node, {
-        onUploaded: resume,
+        onTransferStart: pause,
+        onTransferEnd: resume,
       });
       if (warning) showToast(warning, 'warning');
       showToast(
@@ -270,8 +275,6 @@
       showToast(
         `Subtitle generation failed: ${err instanceof Error ? err.message : String(err)}`
       );
-    } finally {
-      resume();
     }
   }
 

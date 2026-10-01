@@ -387,6 +387,8 @@ def _prune_jobs():
 
 
 def _drop_file(job):
+    if job["path"] is None:  # translation-only job
+        return
     try:
         job["path"].unlink(missing_ok=True)
     except OSError:
@@ -634,8 +636,12 @@ def _vtt_time(t: float) -> str:
     return f"{h:02}:{m:02}:{s:02}.{ms:03}"
 
 
-def _to_vtt(cues: list[dict]) -> str:
+def _to_vtt(cues: list[dict], translated_from: str | None = None) -> str:
     parts = ["WEBVTT", ""]
+    if translated_from:
+        # Lets the browser tell a translation from the original transcript,
+        # so it only ever re-translates from the original.
+        parts += [f"NOTE translated from {translated_from}", ""]
     for c in cues:
         text = c["text"].replace("-->", "->").strip()
         if text:
@@ -643,32 +649,75 @@ def _to_vtt(cues: list[dict]) -> str:
     return "\n".join(parts)
 
 
-def _run_job(job: dict):
+_CUE_TIME = re.compile(
+    r"(\d+):(\d{2}):(\d{2})\.(\d{3})\s+-->\s+(\d+):(\d{2}):(\d{2})\.(\d{3})"
+)
+
+
+def _parse_vtt(vtt: str) -> list[dict]:
+    cues = []
+    for block in re.split(r"\n\s*\n", vtt.replace("\r\n", "\n")):
+        lines = block.strip().split("\n")
+        for i, line in enumerate(lines):
+            m = _CUE_TIME.search(line)
+            if not m:
+                continue
+            h1, m1, s1, ms1, h2, m2, s2, ms2 = (int(x) for x in m.groups())
+            text = "\n".join(lines[i + 1 :]).strip()
+            if text:
+                cues.append(
+                    {
+                        "start": h1 * 3600 + m1 * 60 + s1 + ms1 / 1000,
+                        "end": h2 * 3600 + m2 * 60 + s2 + ms2 / 1000,
+                        "text": text,
+                    }
+                )
+            break
+    return cues
+
+
+def _translated_track(job: dict, cues: list[dict], src: str, dst: str) -> dict:
+    if not TRANSLATE_MODEL:
+        raise RuntimeError("Translation is disabled on the server (TRANSLATE_MODEL)")
+    texts = _translate(job, [c["text"] for c in cues], src, dst)
+    translated = [{**c, "text": t} for c, t in zip(cues, texts)]
+    return {"lang": dst, "translated": True, "vtt": _to_vtt(translated, translated_from=src)}
+
+
+def _transcribe_work(job: dict) -> list[dict]:
+    cues, lang = _transcribe(job)
+    job["language"] = lang
+    tracks = [{"lang": lang, "translated": False, "vtt": _to_vtt(cues)}]
+    target = job["target"]
+    if target and target != lang and cues:
+        try:
+            tracks.append(_translated_track(job, cues, lang, target))
+        except JobCancelled:
+            raise
+        except Exception as err:  # noqa: BLE001 - keep the transcript
+            print("Subtitle translation failed:")
+            traceback.print_exc()
+            job["warning"] = f"Translation failed: {err}"
+    return tracks
+
+
+def _translate_work(job: dict) -> list[dict]:
+    """Translation-only job: the browser already has the original transcript."""
+    if job["cancelled"]:  # deleted while waiting for the previous job
+        raise JobCancelled()
+    return [_translated_track(job, job["cues"], job["language"], job["target"])]
+
+
+def _run_job(job: dict, work):
     try:
         with _work_lock:
-            cues, lang = _transcribe(job)
-            job["language"] = lang
-            tracks = [{"lang": lang, "translated": False, "vtt": _to_vtt(cues)}]
-            target = job["target"]
-            if target and target != lang and cues:
-                if not TRANSLATE_MODEL:
-                    job["warning"] = "Translation is disabled on the server (TRANSLATE_MODEL)"
-                else:
-                    try:
-                        texts = _translate(job, [c["text"] for c in cues], lang, target)
-                        translated = [{**c, "text": t} for c, t in zip(cues, texts)]
-                        tracks.append({"lang": target, "translated": True, "vtt": _to_vtt(translated)})
-                    except JobCancelled:
-                        raise
-                    except Exception as err:  # noqa: BLE001 - keep the transcript
-                        print("Subtitle translation failed:")
-                        traceback.print_exc()
-                        job["warning"] = f"Translation failed: {err}"
+            tracks = work(job)
         job.update(tracks=tracks, state="done", progress=1.0)
     except JobCancelled:
         job.update(state="error", error="cancelled")
     except Exception as err:  # noqa: BLE001 - reported to the browser
-        print("Subtitle job failed:", err)
+        print("Subtitle job failed:")
+        traceback.print_exc()
         job.update(state="error", error=str(err) or type(err).__name__)
     finally:
         job["touched"] = time.time()
@@ -677,18 +726,21 @@ def _run_job(job: dict):
 
 @app.post("/subtitles/jobs")
 async def create_subtitle_job(request: Request):
+    """Starts a job. With `vtt` (an existing original transcript) it only
+    translates it and starts right away; otherwise it waits for the video
+    via /data and /start."""
     body = await request.json()
     _prune_jobs()
     jid = uuid.uuid4().hex
-    path = SUB_DIR / f"{jid}.bin"
-    path.write_bytes(b"")
+    # Anything outside the supported set means auto-detect / no translation.
+    source = body.get("source") if body.get("source") in SUB_LANGS else None
+    target = body.get("target") if body.get("target") in SUB_LANGS else None
     job = {
         "id": jid,
-        "path": path,
+        "path": None,
         "received": 0,
-        # Anything outside the supported set means auto-detect / no translation.
-        "source": body.get("source") if body.get("source") in SUB_LANGS else None,
-        "target": body.get("target") if body.get("target") in SUB_LANGS else None,
+        "source": source,
+        "target": target,
         "state": "receiving",
         "progress": 0.0,
         "language": None,
@@ -698,6 +750,19 @@ async def create_subtitle_job(request: Request):
         "cancelled": False,
         "touched": time.time(),
     }
+    vtt = body.get("vtt")
+    if isinstance(vtt, str):
+        cues = _parse_vtt(vtt)
+        lang = body.get("source")
+        if not cues or not isinstance(lang, str) or target is None or target == lang:
+            raise HTTPException(status_code=400, detail="nothing to translate")
+        job.update(cues=cues, language=lang, state="queued")
+        with _jobs_lock:
+            _jobs[jid] = job
+        threading.Thread(target=_run_job, args=(job, _translate_work), daemon=True).start()
+        return {"id": jid}
+    job["path"] = SUB_DIR / f"{jid}.bin"
+    job["path"].write_bytes(b"")
     with _jobs_lock:
         _jobs[jid] = job
     return {"id": jid}
@@ -730,7 +795,7 @@ def start_subtitle_job(jid: str):
     if job["state"] != "receiving":
         raise HTTPException(status_code=409, detail="job already started")
     job.update(state="queued", touched=time.time())
-    threading.Thread(target=_run_job, args=(job,), daemon=True).start()
+    threading.Thread(target=_run_job, args=(job, _transcribe_work), daemon=True).start()
     return _job_status(job)
 
 

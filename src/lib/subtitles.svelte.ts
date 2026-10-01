@@ -59,6 +59,11 @@ export interface StoredSubtitle {
   vtt: string;
 }
 
+/** Translated tracks carry this NOTE (see _to_vtt in labeler/server.py). */
+function isTranslation(vtt: string): boolean {
+  return /^NOTE translated from /m.test(vtt);
+}
+
 const SUB_INFIX = '.sub.';
 const SUB_EXT = '.vtt';
 
@@ -243,30 +248,44 @@ export interface SubtitleResult {
 
 /**
  * Generates subtitles for one stored video with the current settings and
- * saves them to MEGA. `onUploaded` fires once the server has the whole file,
- * i.e. when MEGA transfers for this job are over.
+ * saves them to MEGA. When the original transcript already exists and only
+ * the translation is missing, just that transcript is sent for translation;
+ * otherwise the whole video is streamed to the server and transcribed.
+ * `onTransferStart`/`onTransferEnd` bracket the MEGA download, if any.
  */
 export async function generateSubtitles(
   storage: Storage,
   videoId: string,
   node: MegaFileLike,
-  opts: { onUploaded?: () => void } = {}
+  opts: { onTransferStart?: () => void; onTransferEnd?: () => void } = {}
 ): Promise<SubtitleResult> {
   if (subtitleJobs[videoId]) throw new Error('Subtitles are already being generated');
   const size = node.size;
   if (typeof size !== 'number' || size <= 0) throw new Error('File size is unknown');
 
-  subtitleJobs[videoId] = { stage: 'upload', progress: 0 };
+  const settings = loadSubtitleSettings();
+  const stored = await getStoredSubtitles(videoId, storage);
+  const original = stored.find((t) => !isTranslation(t.vtt));
+  const translateOnly =
+    !!original &&
+    settings.target !== 'none' &&
+    settings.target !== original.lang &&
+    !stored.some((t) => t.lang === settings.target);
+
+  subtitleJobs[videoId] = { stage: translateOnly ? 'queued' : 'upload', progress: 0 };
   // Read back through the store so progress writes hit the reactive proxy.
   const job = subtitleJobs[videoId];
   const base = labelerUrl();
-  const settings = loadSubtitleSettings();
   let jobId: string | null = null;
   try {
     const created = await fetch(`${base}/subtitles/jobs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ source: settings.source, target: settings.target }),
+      body: JSON.stringify(
+        translateOnly
+          ? { source: original!.lang, target: settings.target, vtt: original!.vtt }
+          : { source: settings.source, target: settings.target }
+      ),
     });
     if (created.status === 404) {
       throw new Error('Scene AI server is outdated — restart run.bat to update it');
@@ -274,25 +293,31 @@ export async function generateSubtitles(
     if (!created.ok) throw new Error(`Scene AI refused the job (HTTP ${created.status})`);
     jobId = (await created.json()).id as string;
 
-    const { url, cleanup } = await createStreamUrl(node);
-    try {
-      let offset = 0;
-      while (offset < size) {
-        const at = offset;
-        const chunk = await withRetries('Stream read', () => readRange(url, at));
-        await withRetries('Chunk upload', () => sendChunk(base, jobId!, at, chunk));
-        offset += chunk.byteLength;
-        job.progress = offset / size;
+    if (!translateOnly) {
+      opts.onTransferStart?.();
+      try {
+        const { url, cleanup } = await createStreamUrl(node);
+        try {
+          let offset = 0;
+          while (offset < size) {
+            const at = offset;
+            const chunk = await withRetries('Stream read', () => readRange(url, at));
+            await withRetries('Chunk upload', () => sendChunk(base, jobId!, at, chunk));
+            offset += chunk.byteLength;
+            job.progress = offset / size;
+          }
+        } finally {
+          cleanup();
+        }
+      } finally {
+        opts.onTransferEnd?.();
       }
-    } finally {
-      cleanup();
-    }
-    opts.onUploaded?.();
 
-    const started = await fetch(`${base}/subtitles/jobs/${jobId}/start`, { method: 'POST' });
-    if (!started.ok) throw new Error(`Scene AI could not start the job (HTTP ${started.status})`);
-    job.stage = 'queued';
-    job.progress = 0;
+      const started = await fetch(`${base}/subtitles/jobs/${jobId}/start`, { method: 'POST' });
+      if (!started.ok) throw new Error(`Scene AI could not start the job (HTTP ${started.status})`);
+      job.stage = 'queued';
+      job.progress = 0;
+    }
 
     const status = await pollUntilDone(base, jobId, job);
     const tracks = (status.tracks ?? []).map((t) => ({ lang: t.lang, vtt: t.vtt }));
