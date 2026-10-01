@@ -336,7 +336,15 @@ async def classify(request: Request):
 SUB_LANGS = {"en": "English", "ko": "Korean", "zh": "Simplified Chinese", "ja": "Japanese"}
 SUB_DIR = Path(tempfile.gettempdir()) / "megastream-subs"
 SUB_DIR.mkdir(parents=True, exist_ok=True)
-JOB_TTL = 3600  # idle seconds before an abandoned/collected job is dropped
+# Jobs live in memory only, so anything left from a previous run (crash,
+# closed window) is an orphan nobody can collect anymore.
+for _stale in SUB_DIR.iterdir():
+    try:
+        _stale.unlink()
+    except OSError:
+        pass
+JOB_TTL = 3600  # idle seconds before a finished, uncollected job is dropped
+UPLOAD_TTL = 900  # idle seconds before a half-sent upload (tab closed) is dropped
 TRANSLATE_BATCH = 20
 
 # Stock phrases whisper invents over silence and moaning (lots of YouTube
@@ -371,7 +379,8 @@ def _prune_jobs():
     now = time.time()
     with _jobs_lock:
         for jid, job in list(_jobs.items()):
-            if job["state"] not in _BUSY and now - job["touched"] > JOB_TTL:
+            ttl = UPLOAD_TTL if job["state"] == "receiving" else JOB_TTL
+            if job["state"] not in _BUSY and now - job["touched"] > ttl:
                 _jobs.pop(jid)
                 _drop_file(job)
 
@@ -730,3 +739,13 @@ def delete_subtitle_job(jid: str):
 
 if TRANSLATE_MODEL:
     threading.Thread(target=_prefetch_translate_model, daemon=True).start()
+
+
+def _prune_loop():
+    # Abandoned uploads must go even when no further job ever comes in.
+    while True:
+        time.sleep(60)
+        _prune_jobs()
+
+
+threading.Thread(target=_prune_loop, daemon=True).start()
