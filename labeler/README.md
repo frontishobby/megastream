@@ -45,11 +45,8 @@ The video page's subtitle button sends that one video here; the server
 transcribes it with [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
 (`large-v3`, ~3 GB download on first use) and, when the "Also translate to"
 language in the Scene AI header menu differs from the spoken one, translates
-the cues through Ollama:
-
-```
-ollama pull huihui_ai/gemma-4-abliterated:12b
-```
+the cues through [Ollama](https://ollama.com/download) (install it once; the
+server pulls `huihui_ai/gemma-4-abliterated:12b` into it by itself on start).
 
 Whisper is unloaded before translation starts and the translator right
 after, so the two never share the GPU (peak ~10 GB on top of the tagger).

@@ -475,6 +475,51 @@ def _ollama_chat(payload: dict) -> str:
     return res.json()["message"]["content"]
 
 
+_pull_lock = threading.Lock()
+
+
+def _ensure_translate_model():
+    """Pulls TRANSLATE_MODEL into Ollama when it isn't there yet."""
+    with _pull_lock:
+        try:
+            res = requests.post(
+                f"{OLLAMA_URL}/api/show", json={"model": TRANSLATE_MODEL}, timeout=10
+            )
+        except requests.ConnectionError:
+            raise RuntimeError(f"Ollama is not reachable at {OLLAMA_URL}") from None
+        if res.ok:
+            return
+        print(f"Pulling {TRANSLATE_MODEL} into Ollama (first run, several GB) ...")
+        with requests.post(
+            f"{OLLAMA_URL}/api/pull",
+            json={"model": TRANSLATE_MODEL, "stream": True},
+            stream=True,
+            timeout=(10, 600),
+        ) as pull:
+            pull.raise_for_status()
+            shown = -10
+            for line in pull.iter_lines():
+                if not line:
+                    continue
+                msg = json.loads(line)
+                if msg.get("error"):
+                    raise RuntimeError(f"ollama pull failed: {msg['error']}")
+                total, done = msg.get("total"), msg.get("completed")
+                if total and done and done * 100 // total >= shown + 10:
+                    shown = done * 100 // total
+                    print(f"  {msg.get('status', 'pulling')}: {shown}%")
+        print(f"{TRANSLATE_MODEL} ready")
+
+
+def _prefetch_translate_model():
+    # Background so the tagger is usable while the model downloads.
+    try:
+        _ensure_translate_model()
+    except Exception as err:  # noqa: BLE001 - retried when a job needs it
+        print(f"Subtitle translation unavailable for now: {err}")
+        print("Install Ollama from https://ollama.com/download to enable it.")
+
+
 def _translate_batch(lines: list[str], context: list[str], src: str, dst: str):
     """Returns the translated lines, or None when the reply doesn't line up."""
     src_name, dst_name = SUB_LANGS.get(src, src), SUB_LANGS[dst]
@@ -529,6 +574,7 @@ def _translate_batch(lines: list[str], context: list[str], src: str, dst: str):
 
 def _translate(job: dict, texts: list[str], src: str, dst: str) -> list[str]:
     job.update(state="translating", progress=0.0)
+    _ensure_translate_model()  # no-op unless Ollama started after us
     out: list[str] = []
     try:
         for i in range(0, len(texts), TRANSLATE_BATCH):
@@ -680,3 +726,7 @@ def delete_subtitle_job(jid: str):
         job["cancelled"] = True
         _drop_file(job)
     return {"ok": True}
+
+
+if TRANSLATE_MODEL:
+    threading.Thread(target=_prefetch_translate_model, daemon=True).start()

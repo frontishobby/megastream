@@ -27,6 +27,11 @@ if errorlevel 1 (
   copy /y requirements.txt .venv\requirements.installed >nul
 )
 
+where ollama >nul 2>nul
+if errorlevel 1 (
+  echo Ollama not found - subtitle translation needs it: https://ollama.com/download
+)
+
 echo.
 echo Starting scene labeler on http://127.0.0.1:8756
 echo First start downloads the tagger model (~1.2 GB) - keep this window open.
