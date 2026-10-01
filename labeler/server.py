@@ -37,6 +37,8 @@ import io
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -44,6 +46,7 @@ import time
 import traceback
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 import numpy as np
 import onnxruntime as ort
@@ -502,9 +505,54 @@ def _ollama_chat(payload: dict) -> str:
 _pull_lock = threading.Lock()
 
 
+def _ollama_up() -> bool:
+    try:
+        return requests.get(f"{OLLAMA_URL}/api/version", timeout=2).ok
+    except requests.RequestException:
+        return False
+
+
+def _find_ollama():
+    exe = shutil.which("ollama")
+    if exe:
+        return exe
+    # Fresh installs aren't on this console's PATH until it is reopened.
+    default = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe"
+    return str(default) if sys.platform == "win32" and default.is_file() else None
+
+
+def _start_ollama():
+    """Starts a local Ollama server when it's installed but not running."""
+    if _ollama_up():
+        return
+    exe = _find_ollama()
+    if not exe:
+        raise RuntimeError(
+            f"Ollama is not reachable at {OLLAMA_URL} and not installed — "
+            "get it from https://ollama.com/download"
+        )
+    if urlparse(OLLAMA_URL).hostname not in ("127.0.0.1", "localhost"):
+        raise RuntimeError(f"Ollama is not reachable at {OLLAMA_URL}")
+    print("Starting Ollama ...")
+    # Own hidden console, so it outlives this window like the tray app would.
+    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    subprocess.Popen(
+        [exe, "serve"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=flags,
+    )
+    for _ in range(30):
+        time.sleep(1)
+        if _ollama_up():
+            return
+    raise RuntimeError("Ollama was started but didn't come up within 30s")
+
+
 def _ensure_translate_model():
-    """Pulls TRANSLATE_MODEL into Ollama when it isn't there yet."""
+    """Starts Ollama if needed and pulls TRANSLATE_MODEL when it isn't there yet."""
     with _pull_lock:
+        _start_ollama()
         try:
             res = requests.post(
                 f"{OLLAMA_URL}/api/show", json={"model": TRANSLATE_MODEL}, timeout=10
@@ -541,7 +589,6 @@ def _prefetch_translate_model():
         _ensure_translate_model()
     except Exception as err:  # noqa: BLE001 - retried when a job needs it
         print(f"Subtitle translation unavailable for now: {err}")
-        print("Install Ollama from https://ollama.com/download to enable it.")
 
 
 def _translate_batch(lines: list[str], context: list[str], src: str, dst: str):
