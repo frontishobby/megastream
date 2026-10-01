@@ -41,6 +41,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 from pathlib import Path
 
@@ -473,6 +474,18 @@ def _transcribe(job: dict):
         gc.collect()
 
 
+def _raise_ollama(res):
+    """raise_for_status, but with Ollama's own error text (e.g. an outdated
+    Ollama that doesn't know the model architecture) instead of a bare 500."""
+    if res.ok:
+        return
+    try:
+        detail = res.json().get("error") or res.text
+    except ValueError:
+        detail = res.text
+    raise RuntimeError(f"Ollama HTTP {res.status_code}: {detail.strip()[:300]}")
+
+
 def _ollama_chat(payload: dict) -> str:
     try:
         res = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=300)
@@ -480,7 +493,7 @@ def _ollama_chat(payload: dict) -> str:
         raise RuntimeError(f"Ollama is not reachable at {OLLAMA_URL}") from None
     if res.status_code == 404:
         raise RuntimeError(f"{TRANSLATE_MODEL} is not installed — run: ollama pull {TRANSLATE_MODEL}")
-    res.raise_for_status()
+    _raise_ollama(res)
     return res.json()["message"]["content"]
 
 
@@ -505,7 +518,7 @@ def _ensure_translate_model():
             stream=True,
             timeout=(10, 600),
         ) as pull:
-            pull.raise_for_status()
+            _raise_ollama(pull)
             shown = -10
             for line in pull.iter_lines():
                 if not line:
@@ -648,7 +661,8 @@ def _run_job(job: dict):
                     except JobCancelled:
                         raise
                     except Exception as err:  # noqa: BLE001 - keep the transcript
-                        print("Subtitle translation failed:", err)
+                        print("Subtitle translation failed:")
+                        traceback.print_exc()
                         job["warning"] = f"Translation failed: {err}"
         job.update(tracks=tracks, state="done", progress=1.0)
     except JobCancelled:
