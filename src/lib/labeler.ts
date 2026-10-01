@@ -13,17 +13,29 @@ export function labelerUrl(): string {
   }
 }
 
-export async function probeLabeler(timeoutMs = 2500): Promise<boolean> {
+export interface LabelerHealth {
+  ok: true;
+  tagger?: string;
+  vlm?: string | null;
+  /** Absent on servers that predate subtitle generation. */
+  subtitles?: { whisper: string; translate: string | null };
+}
+
+export async function fetchLabelerHealth(timeoutMs = 2500): Promise<LabelerHealth | null> {
   try {
     const res = await fetch(`${labelerUrl()}/health`, {
       signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!res.ok) return false;
+    if (!res.ok) return null;
     const data = await res.json();
-    return data?.ok === true;
+    return data?.ok === true ? (data as LabelerHealth) : null;
   } catch (_) {
-    return false;
+    return null;
   }
+}
+
+export async function probeLabeler(timeoutMs = 2500): Promise<boolean> {
+  return (await fetchLabelerHealth(timeoutMs)) !== null;
 }
 
 export interface FrameLabel {

@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { ArrowLeft, StickyNote, Pencil, Check, X, Loader2, Film, RefreshCw, Download, FolderInput, Folder, ImageUp } from '@lucide/svelte';
-  import { untrack } from 'svelte';
+  import { ArrowLeft, StickyNote, Pencil, Check, X, Loader2, Film, RefreshCw, Download, FolderInput, Folder, ImageUp, Captions } from '@lucide/svelte';
+  import { untrack, tick } from 'svelte';
   import type { MegaNode } from '../mega';
   import { MegaService } from '../mega';
   import { createStreamUrl, isTransportStream } from '../stream';
@@ -12,7 +12,16 @@
     type Scene,
     type SceneData,
   } from '../scenes';
-  import { resolveSceneAnalysisMode } from '../labeler';
+  import { resolveSceneAnalysisMode, fetchLabelerHealth, labelerUrl } from '../labeler';
+  import {
+    generateSubtitles,
+    getStoredSubtitles,
+    loadSubtitleSettings,
+    subtitleEvents,
+    subtitleJobs,
+    subtitleLangLabel,
+    type SubtitleStage,
+  } from '../subtitles.svelte';
   import { THUMB_FOLDER, saveThumbnailFrame, regenerateThumbnail } from '../thumbnails';
   import type { Storage, MutableFile, File as MegaFile } from 'megajs';
   import { showToast } from '../toast.svelte';
@@ -149,6 +158,120 @@
     } finally {
       detecting = null;
       if (wasPlaying) player?.play().catch(() => {});
+    }
+  }
+
+  // The page scrollbar is noise next to the player; scrolling still works.
+  $effect(() => {
+    document.documentElement.classList.add('no-scrollbar');
+    return () => document.documentElement.classList.remove('no-scrollbar');
+  });
+
+  // --- Subtitles ---
+  let subtitleTracks = $state<{ lang: string; url: string }[]>([]);
+  const subtitleJob = $derived(subtitleJobs[node.id]);
+
+  $effect(() => {
+    const id = node.id;
+    const storage = (node.node as unknown as { storage?: Storage }).storage;
+    let cancelled = false;
+    let urls: string[] = [];
+    const load = () =>
+      getStoredSubtitles(id, storage).then((list) => {
+        if (cancelled) return;
+        urls.forEach((u) => URL.revokeObjectURL(u));
+        const next = list.map((s) => ({
+          lang: s.lang,
+          url: URL.createObjectURL(new Blob([s.vtt], { type: 'text/vtt' })),
+        }));
+        urls = next.map((t) => t.url);
+        subtitleTracks = next;
+      });
+    subtitleTracks = [];
+    load();
+    // Picks up a job that finished while this view was closed or reopened.
+    const onSubtitles = (e: Event) => {
+      if ((e as CustomEvent).detail === id) load();
+    };
+    subtitleEvents.addEventListener('subtitles', onSubtitles);
+    return () => {
+      cancelled = true;
+      subtitleEvents.removeEventListener('subtitles', onSubtitles);
+      urls.forEach((u) => URL.revokeObjectURL(u));
+    };
+  });
+
+  // Tracks appended after the element loaded ignore `default`, so pick the
+  // visible one by hand: the translation target if there is one.
+  $effect(() => {
+    const v = videoEl;
+    const list = subtitleTracks;
+    if (!v || list.length === 0) return;
+    const preferred = loadSubtitleSettings().target;
+    tick().then(() => {
+      const tracks = Array.from(v.textTracks).filter((t) => t.kind === 'subtitles');
+      const pick = tracks.find((t) => t.language === preferred) ?? tracks[0];
+      for (const t of tracks) t.mode = t === pick ? 'showing' : 'disabled';
+    });
+  });
+
+  const STAGE_LABELS: Record<SubtitleStage, string> = {
+    upload: 'Sending',
+    queued: 'Queued',
+    loading: 'Loading model',
+    transcribing: 'Transcribing',
+    translating: 'Translating',
+    saving: 'Saving',
+  };
+
+  async function handleGenerateSubtitles() {
+    if (subtitleJob) return;
+    const storage = (node.node as unknown as { storage?: Storage }).storage;
+    if (!storage) {
+      showToast('Cannot generate subtitles: storage unavailable');
+      return;
+    }
+    if (isTransportStream(node.name)) {
+      showToast('Subtitles are not supported for MPEG-TS files');
+      return;
+    }
+    const health = await fetchLabelerHealth();
+    if (!health) {
+      showToast(`Scene AI is not reachable at ${labelerUrl()}`);
+      return;
+    }
+    if (!health.subtitles) {
+      showToast('Scene AI server is outdated — restart run.bat to update it');
+      return;
+    }
+    // Sending the file streams it from MEGA; pause the player meanwhile so
+    // the two transfers don't trip MEGA's parallel-connection limit. The
+    // server-side work afterwards doesn't touch MEGA, so playback can resume.
+    const player = videoEl;
+    let resumePlayer = !!player && !player.paused && !player.ended;
+    const resume = () => {
+      // A view closed mid-job leaves a detached element; never start it.
+      if (resumePlayer && player?.isConnected) player.play().catch(() => {});
+      resumePlayer = false;
+    };
+    try {
+      player?.pause();
+    } catch (_) {}
+    try {
+      const { tracks, warning } = await generateSubtitles(storage, node.id, node.node, {
+        onUploaded: resume,
+      });
+      if (warning) showToast(warning, 'warning');
+      showToast(
+        `Subtitles ready: ${tracks.map((t) => subtitleLangLabel(t.lang)).join(', ')}`,
+        'warning'
+      );
+    } catch (err) {
+      showToast(
+        `Subtitle generation failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+    } finally {
+      resume();
     }
   }
 
@@ -508,6 +631,9 @@
           class="w-full h-full"
         >
           <track kind="captions" />
+          {#each subtitleTracks as t (t.url)}
+            <track kind="subtitles" src={t.url} srclang={t.lang} label={subtitleLangLabel(t.lang)} />
+          {/each}
         </video>
       {/if}
       {#if loading}
@@ -522,7 +648,7 @@
   <!-- Scene navigation strip -->
   <div class="mt-3 px-4 md:px-6">
     {#if scenes && scenes.scenes.length > 0}
-      <div class="flex items-center gap-2 overflow-x-auto pb-1">
+      <div class="flex flex-wrap items-center gap-2">
         <span class="shrink-0 text-xs text-gray-500 inline-flex items-center gap-1.5 pr-1">
           <Film size={14} />
           {scenes.scenes.length} scenes
@@ -663,6 +789,29 @@
               <Loader2 size={16} class="animate-spin" />
             {:else}
               <ImageUp size={16} />
+            {/if}
+          </button>
+          <button
+            type="button"
+            onclick={handleGenerateSubtitles}
+            disabled={!!subtitleJob}
+            class="text-gray-500 hover:text-gray-200 p-1 rounded shrink-0 inline-flex items-center gap-1.5 transition-opacity disabled:cursor-not-allowed {subtitleJob
+              ? 'opacity-100 text-gray-300'
+              : 'opacity-60 group-hover:opacity-100'}"
+            title={subtitleTracks.length ? 'Regenerate subtitles' : 'Generate subtitles'}
+            aria-label={subtitleTracks.length ? 'Regenerate subtitles' : 'Generate subtitles'}
+          >
+            {#if subtitleJob}
+              <Loader2 size={16} class="animate-spin" />
+              <span class="text-xs whitespace-nowrap">
+                {STAGE_LABELS[subtitleJob.stage]}{subtitleJob.stage === 'queued' ||
+                subtitleJob.stage === 'loading' ||
+                subtitleJob.stage === 'saving'
+                  ? '…'
+                  : ` ${Math.round(subtitleJob.progress * 100)}%`}
+              </span>
+            {:else}
+              <Captions size={16} />
             {/if}
           </button>
           <button

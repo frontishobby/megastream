@@ -20,3 +20,11 @@ html, body {
 #app {
   min-height: 100vh;
 }
+
+/* Video view: page still scrolls, the bar just isn't drawn. */
+html.no-scrollbar {
+  scrollbar-width: none;
+}
+html.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}

@@ -39,6 +39,22 @@ uvicorn server:app --host 127.0.0.1 --port 8756
 
 Pick an NSFW-capable vision model — mainstream VLMs refuse these frames.
 
+## Subtitles
+
+The video page's subtitle button sends that one video here; the server
+transcribes it with [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
+(`large-v3`, ~3 GB download on first use) and, when the "Also translate to"
+language in the Scene AI header menu differs from the spoken one, translates
+the cues through Ollama:
+
+```
+ollama pull huihui_ai/gemma-4-abliterated:12b
+```
+
+Whisper is unloaded before translation starts and the translator right
+after, so the two never share the GPU (peak ~10 GB on top of the tagger).
+The browser stores the tracks as `.megastream/<nodeId>.sub.<lang>.vtt`.
+
 ## API
 
 - `GET /health` → `{ ok, tagger, vlm }`
@@ -47,5 +63,11 @@ Pick an NSFW-capable vision model — mainstream VLMs refuse these frames.
   missionary / doggy / cowgirl / reverse-cowgirl / spooning / standing /
   oral / paizuri / handjob / solo, or `null` when unsure.
 
+- `POST /subtitles/jobs` (`{ source, target }`) → `{ id }`, then
+  `PUT /subtitles/jobs/{id}/data?offset=N` (raw video bytes, in order),
+  `POST /subtitles/jobs/{id}/start`, poll `GET /subtitles/jobs/{id}` until
+  `state` is `done` (carries `tracks: [{ lang, translated, vtt }]`) or
+  `error`, and `DELETE /subtitles/jobs/{id}` to clean up.
+
 Config via env vars: `WD_MODEL`, `VLM_MODEL`, `OLLAMA_URL`, `VLM_ESCALATE`,
-`MIN_CONF` (see `server.py` docstring).
+`MIN_CONF`, `WHISPER_MODEL`, `TRANSLATE_MODEL` (see `server.py` docstring).
